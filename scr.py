@@ -454,10 +454,22 @@ def make_text_main(
     if not header.startswith("[テキスト表示]"):
         return None
     if not separator:
-        raise ScriptError("cannot safely update dialogue: command body is missing")
+        # Some localized scripts keep the original-language command in main
+        # while storing the translated runtime string in args[1]. In that
+        # layout main is reference/source text, not a synchronized copy.
+        return None
+
+    normalized_body, body_offsets = normalize_line_breaks_with_offsets(old_body)
+    normalized_message, _message_offsets = normalize_line_breaks_with_offsets(old_message)
+    if not normalized_body.startswith(normalized_message):
+        # Do not fail the import and, more importantly, do not overwrite a
+        # different-language/reference command with translated args[1].
+        # The runtime argument is still updated by import_items; main stays
+        # byte-for-byte unchanged unless its original text can be anchored.
+        return None
 
     # Preserve the complete original header, including non-path voice IDs and spacing.
-    # Only replace the exact speaker substring when the speaker was edited.
+    # Only replace the exact speaker substring when it can be located safely.
     first = header
     if name != old_name:
         command = "[テキスト表示]"
@@ -465,20 +477,12 @@ def make_text_main(
         if old_name:
             speaker_pos = header.find(old_name, len(command))
             if speaker_pos < 0:
-                raise ScriptError(
-                    "cannot safely locate the original speaker in the command header"
-                )
+                # A localized speaker name may differ from the source-language
+                # name stored in main. Leave the reference command unchanged.
+                return None
             first = header[:speaker_pos] + name + header[speaker_pos + len(old_name):]
         else:
             first = command + " " + name + header_rest
-
-    normalized_body, body_offsets = normalize_line_breaks_with_offsets(old_body)
-    normalized_message, _message_offsets = normalize_line_breaks_with_offsets(old_message)
-    if not normalized_body.startswith(normalized_message):
-        raise ScriptError(
-            "cannot safely locate the original dialogue text in the command; "
-            "refusing to discard unknown trailing data"
-        )
 
     # Most scripts differ only in whether internal line breaks are CR, LF or CRLF.
     # When args[1] itself ends in line breaks, consume exactly those units from main;
