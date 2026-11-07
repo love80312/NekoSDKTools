@@ -1,16 +1,16 @@
 # NekoSDKTools（個人優化版）
 
-用於 NekoSDK 遊戲資源的個人工具組，涵蓋 NEKOPACK4A 封包、NEKOSDK_ADVSCRIPT2 腳本，以及 Waffle BMP+ALP 圖像。
+用於 NekoSDK／Waffle 遊戲資源的個人工具組，涵蓋 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本，以及 BMP+ALP 圖像。
 
-> 本專案不是通用的 PAK／TXT 解包工具。只有符合上述格式的檔案，才能使用對應功能處理。
+> 本專案不是通用的 PAK／TXT 解包工具。只有符合對應格式的檔案，才能使用相關功能。修改後資源仍須在實際遊戲中測試。
 
 ## 工具功能
 
 | 檔案 | 功能 |
 |---|---|
 | `GUI.py` | Tkinter 圖形介面，整合封包、腳本及圖像操作 |
-| `pak.py` | 解包及重包 `NEKOPACK4A` 格式的 `.pak` |
-| `scr.py` | 讀取 `NEKOSDK_ADVSCRIPT2` 腳本，將可辨識的對話／選項匯出為 UTF-8 JSON，並可匯入修改內容 |
+| `pak.py` | 解包 NEKOPACK4A／NEKOPACK4S；重包時可選擇 4A 或 4S |
+| `scr.py` | 讀取 NEKOSDK_ADVSCRIPT2 腳本，將可辨識的對話／選項匯出為 UTF-8 JSON，並可匯入修改內容 |
 | `bmp_alp.py` | 合併 BMP+ALP 為一般 RGBA 圖片，或將一般圖片拆成 BMP+ALP |
 | `requirements.txt` | 列出圖像工具使用的 Pillow 依賴 |
 
@@ -21,49 +21,70 @@
 - `pak.py` 與 `scr.py` 使用 Python 標準函式庫，不需要額外套件。
 - `bmp_alp.py` 需要 Pillow 10.0 以上版本。
 
+以下命令使用 Windows Python Launcher。`py -3` 會呼叫系統已註冊的 Python 3；也可以改用 `python`，前提是 Python 已加入 PATH。
+
 安裝圖像工具依賴：
 
 ```bat
-py -3.13 -m pip install -r requirements.txt
+py -3 -m pip install -r requirements.txt
 ```
 
 啟動圖形介面：
 
 ```bat
-py -3.13 GUI.py
+py -3 GUI.py
 ```
 
-`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py` 請放在同一個資料夾。GUI 透過目前使用的 Python 執行子工具，並在下方顯示執行指令、處理訊息及錯誤。
-
-## 圖形介面功能
-
-| 頁籤 | 操作 |
-|---|---|
-| PAK 封包 | PAK 解包、資料夾重包；重包可設定 Zlib 壓縮等級及工作執行緒 |
-| 腳本／JSON | ADVSCRIPT2 腳本匯出 JSON、JSON 匯入腳本；可選腳本字串編碼 |
-| BMP／ALP 圖像 | 單組／批次合併 BMP+ALP，以及單張／批次拆分圖片 |
-
-GUI 的 PAK 重包設定範圍為壓縮等級 0–9、工作執行緒 1–16；預設等級 9、單執行緒。舊電腦建議先維持單執行緒。
+`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py` 請放在同一個資料夾。GUI 透過啟動 GUI 時使用的同一個 Python 執行子工具，並在下方顯示執行指令、處理訊息及錯誤。
 
 ---
 
 ## 1. PAK 封包：解包與重包
 
-`pak.py` 僅針對 `NEKOPACK4A` 格式。封包內檔名使用 CP932，檔案資料使用 Zlib 壓縮，並有封包格式本身的索引及資料遮罩處理；不代表能處理其他遊戲或其他種類的 `.pak`。
+`pak.py` 支援以下兩種 NekoSDK 封包：
 
-解包：
+| 格式 | 結構 | 解包 | 重包 |
+|---|---|---:|---:|
+| `NEKOPACK4A` | 索引區可包含多筆檔案紀錄 | 支援 | 支援 |
+| `NEKOPACK4S` | 單一檔案紀錄 | 支援 | 支援，來源資料夾必須恰好有一個檔案 |
+
+兩種格式的索引配置不同，不能只替換檔頭就互相轉換。程式會依格式分別建立索引，並共用檔案資料的 Zlib 壓縮、大小資訊及 XOR 遮罩處理。
+
+### 1.1 解包
+
+A、S 格式都使用相同的解包命令，程式會自動辨識封包檔頭：
 
 ```bat
-py -3.13 pak.py -u "D:\Game\scr.pak" "D:\Game\scr_unpacked"
+py -3 pak.py -u "D:\Game\scr.pak" "D:\Game\scr_unpacked"
 ```
 
-重包：
+### 1.2 重包
+
+預設輸出 `NEKOPACK4A`，可以包含一個或多個檔案：
 
 ```bat
-py -3.13 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak"
+py -3 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak"
 ```
 
-重包設定可透過環境變數調整：
+指定輸出 `NEKOPACK4A`：
+
+```bat
+py -3 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak" --format 4A
+```
+
+指定輸出 `NEKOPACK4S`：
+
+```bat
+py -3 pak.py -p "D:\Game\single_file_folder" "D:\Game\single_new.pak" --format 4S
+```
+
+**4S 格式限制：** 來源資料夾內必須恰好有一個檔案（可位於子資料夾）。若有零個或多個檔案，程式會停止並回報數量，不會輸出不符合格式的封包。
+
+GUI 的「PAK 封包」頁籤也可在重包時選擇 `4A` 或 `4S`。解包時會自動辨識格式；選擇 `4S` 重包時，GUI 會先檢查來源檔案數量，`pak.py` 仍會再次執行檢查。
+
+### 1.3 重包設定
+
+重包可透過環境變數調整：
 
 | 環境變數 | 說明 | 預設值 |
 |---|---|---:|
@@ -75,10 +96,12 @@ py -3.13 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak"
 ```bat
 set NEKO_PAK_LEVEL=6
 set NEKO_PAK_WORKERS=1
-py -3.13 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak"
+py -3 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak" --format 4A
 ```
 
-輸出 PAK 必須放在來源資料夾之外。封包內檔名依 CP932 編碼寫入；若檔名無法使用 CP932 表示，重包會報錯。
+舊電腦建議先維持單執行緒。輸出 PAK 必須放在來源資料夾之外。封包內檔名使用 CP932 編碼；若檔名無法使用 CP932 表示，重包會明確報錯。
+
+> 重包成功代表封包結構及工具內部往返測試通過，不代表遊戲一定接受新封包。若遊戲原始素材使用 4S，建議優先以 4S 重包並在遊戲內測試；不要只因 A、S 都能被工具解析，就假定遊戲端可以互換。
 
 ---
 
@@ -101,13 +124,13 @@ NEKOSDK_ADVSCRIPT2
 單一檔案：
 
 ```bat
-py -3.13 scr.py -e "D:\Game\scr_unpacked\ep_300_000_000.txt" "D:\Game\ep_300_000_000.json" --encoding cp932
+py -3 scr.py -e "D:\Game\scr_unpacked\ep_300_000_000.txt" "D:\Game\ep_300_000_000.json" --encoding cp932
 ```
 
 整個資料夾：
 
 ```bat
-py -3.13 scr.py -e "D:\Game\scr_unpacked" "D:\Game\scr_json" --encoding cp932
+py -3 scr.py -e "D:\Game\scr_unpacked" "D:\Game\scr_json" --encoding cp932
 ```
 
 匯出後的 JSON 使用 UTF-8，可用 Notepad++ 等文字編輯器檢視及編輯。資料夾模式會保留相對子資料夾結構，並將腳本副檔名改為 `.json`。
@@ -161,13 +184,13 @@ py -3.13 scr.py -e "D:\Game\scr_unpacked" "D:\Game\scr_json" --encoding cp932
 單一檔案：
 
 ```bat
-py -3.13 scr.py -i "D:\Game\scr_unpacked\ep_300_000_000.txt" "D:\Game\ep_300_000_000.json" "D:\Game\ep_300_000_000_imported.txt" --encoding cp932
+py -3 scr.py -i "D:\Game\scr_unpacked\ep_300_000_000.txt" "D:\Game\ep_300_000_000.json" "D:\Game\ep_300_000_000_imported.txt" --encoding cp932
 ```
 
 整個資料夾：
 
 ```bat
-py -3.13 scr.py -i "D:\Game\scr_unpacked" "D:\Game\scr_json" "D:\Game\scr_imported" --encoding cp932
+py -3 scr.py -i "D:\Game\scr_unpacked" "D:\Game\scr_json" "D:\Game\scr_imported" --encoding cp932
 ```
 
 資料夾匯入時，原始腳本與 JSON 資料夾的相對路徑必須對應；每個 ADVSCRIPT2 腳本都必須有相對應的 JSON。非 ADVSCRIPT2 檔案不需要 JSON，會原樣複製到輸出資料夾，避免重包時遺漏其他資源。
@@ -201,31 +224,31 @@ CP932 無法表示的繁體中文字會在匯入時明確報錯，不會自動�
 單組：
 
 ```bat
-py -3.13 bmp_alp.py -e "D:\Game\image.bmp" "D:\Game\image.alp" "D:\Game\image.png"
+py -3 bmp_alp.py -e "D:\Game\image.bmp" "D:\Game\image.alp" "D:\Game\image.png"
 ```
 
 批次：
 
 ```bat
-py -3.13 bmp_alp.py -e "D:\Game\bmp_alp" "D:\Game\png"
+py -3 bmp_alp.py -e "D:\Game\bmp_alp" "D:\Game\png"
 ```
 
 單張合併可依輸出副檔名選擇 PNG、TGA、BMP、JPEG、WebP 或 TIFF；批次合併固定輸出 PNG。JPEG 不支援 Alpha，輸出 JPEG 時會轉成 RGB 並捨棄透明度。
 
-批次模式會依相對路徑尋找同名 BMP／ALP；缺少 ALP 的 BMP 會提示並跳過，不會拿其他檔案的 ALP 代替。
+批次模式會依相對路徑尋找同名 BMP／ALP；缺少 ALP 的 BMP 會提示並跳過，不會拿其他檔案的 ALP 代替。個別配對發生轉換錯誤時會列出錯誤並回報非零結束代碼，即使其他圖片已成功轉換，也不會把部分失敗誤報為完全成功。
 
 ### 3.2 將一般圖片拆成 BMP+ALP
 
 單張：
 
 ```bat
-py -3.13 bmp_alp.py -c "D:\Game\image.png" "D:\Game\image.bmp" "D:\Game\image.alp"
+py -3 bmp_alp.py -c "D:\Game\image.png" "D:\Game\image.bmp" "D:\Game\image.alp"
 ```
 
 批次：
 
 ```bat
-py -3.13 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
+py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 ```
 
 來源圖片支援 PNG、TGA、BMP、JPG／JPEG、WebP、TIF／TIFF。拆分時輸出 BMP 與 ALP；輸出 ALP 使用緊密排列的每像素 1 byte Alpha 資料。
@@ -236,7 +259,7 @@ py -3.13 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 
 ## 已驗證項目
 
-以下為目前 `T1` 分支程式搭配測試素材的往返驗證紀錄。往返一致代表解包／重包或腳本匯入／匯出後資料符合比對條件，不代表已在遊戲內確認所有重包檔均能正常載入。
+以下為目前程式搭配測試素材的工具層級驗證紀錄。位元組一致代表解包／重包或腳本匯入／匯出後資料符合比對條件，不代表已在遊戲內確認所有重包檔均能正常載入。
 
 | 測試素材 | 測試內容 | 結果 |
 |---|---|---|
@@ -245,6 +268,8 @@ py -3.13 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 | `ep_300_000_000.txt` | 501 筆底層記錄，匯出 118 筆文字；修改後匯入並再次匯出 | 118 筆完全一致 |
 | `scr.pak` | PAK 解包、重包、再次解包後比較全部檔案 | 245／245 相同 |
 | `sys_v1.pak` | PAK 解包、重包、再次解包後比較全部檔案 | 14／14 相同 |
+| `NEKOPACK4S` 範例 | 原始封包解包、4S 重包、再次解包，比對腳本 SHA-256 | 461,008 bytes 完全一致 |
+| `NEKOPACK4A` 測試封包 | 兩個檔案重包、再次解包後逐位元組比較 | 完全一致 |
 | BMP／ALP 範例 | 合併有對應 ALP 的 BMP；處理缺少 ALP 的 BMP | 5 組合併成功；2 個缺少 ALP 的 BMP 提示並跳過 |
 
 測試素材未全部包含在此儲存庫中。實際使用前仍請保留原始 PAK／腳本備份，並在遊戲內測試修改後資源。

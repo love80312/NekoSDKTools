@@ -2,12 +2,12 @@
 """Convert NekoSDK/Waffle BMP+ALP pairs to/from ordinary RGBA images.
 
 Extract:
-  py -3.13 bmp_alp.py -e image.bmp image.alp image.png
-  py -3.13 bmp_alp.py -e extracted_folder png_folder
+  py -3 bmp_alp.py -e image.bmp image.alp image.png
+  py -3 bmp_alp.py -e extracted_folder png_folder
 
 Create:
-  py -3.13 bmp_alp.py -c image.png image.bmp image.alp
-  py -3.13 bmp_alp.py -c png_folder bmp_alp_folder
+  py -3 bmp_alp.py -c image.png image.bmp image.alp
+  py -3 bmp_alp.py -c png_folder bmp_alp_folder
 
 ALP stores one 8-bit alpha value per pixel. Extraction accepts both tightly
 packed rows and rows padded to a 4-byte boundary. Creation writes tightly
@@ -184,6 +184,10 @@ def extract_folder(input_folder: Path, output_folder: Path) -> None:
         f"extract summary: {extracted} converted, {len(missing)} missing ALP, "
         f"{len(failed)} failed"
     )
+    if failed:
+        raise BmpAlpError(
+            f"{len(failed)} BMP/ALP conversion(s) failed; see the error messages above"
+        )
     if extracted == 0:
         raise BmpAlpError("no BMP/ALP pairs could be extracted")
 

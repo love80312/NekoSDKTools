@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NekoSDK NEKOPACK4A / NEKOPACK4S extractor and NEKOPACK4A repacker.
+"""NekoSDK NEKOPACK4A / NEKOPACK4S extractor and repacker.
 
 Supported archive formats:
 - NEKOPACK4A: indexed archive; supports extraction and repacking.
@@ -397,13 +397,13 @@ def compress_file(source: Path, destination: Path, level: int) -> tuple[int, int
                 break
             unpacked_size += len(chunk)
             if unpacked_size > UINT32_MAX:
-                raise PakError(f"file is too large for NEKOPACK4A: {source}")
+                raise PakError(f"file is too large for NekoSDK PAK: {source}")
             output_file.write(compressor.compress(chunk))
         output_file.write(compressor.flush())
 
     compressed_size = destination.stat().st_size
     if compressed_size > UINT32_MAX:
-        raise PakError(f"compressed file is too large for NEKOPACK4A: {source}")
+        raise PakError(f"compressed file is too large for NekoSDK PAK: {source}")
     return compressed_size, unpacked_size
 
 
@@ -421,7 +421,7 @@ def prepare_entry(
     compressed_size, unpacked_size = compress_file(source_path, temp_path, level)
     stored_size = compressed_size + 4
     if stored_size > UINT32_MAX:
-        raise PakError(f"compressed file is too large for NEKOPACK4A: {name}")
+        raise PakError(f"compressed file is too large for NekoSDK PAK: {name}")
     return PreparedEntry(name, name_bytes, temp_path, compressed_size, unpacked_size, stored_size)
 
 
