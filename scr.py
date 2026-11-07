@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import os
 import struct
@@ -50,6 +51,26 @@ class Record:
 @dataclass
 class Script:
     records: list[Record]
+
+
+@dataclass(frozen=True)
+class ChoiceSpan:
+    """A replaceable choice string range within a scene command."""
+
+    start: int
+    end: int
+    value: str
+
+
+def validate_encoding(encoding: str) -> str:
+    """Resolve an encoding name before any script files are processed."""
+    name = encoding.strip()
+    if not name:
+        raise ScriptError("encoding name cannot be empty")
+    try:
+        return codecs.lookup(name).name
+    except LookupError as exc:
+        raise ScriptError(f"unknown text encoding: {encoding!r}") from exc
 
 
 def read_u32(data: bytes, offset: int, context: str) -> int:
@@ -220,54 +241,127 @@ def split_line_ending(line: str) -> tuple[str, str]:
     return line, ""
 
 
-def is_scene_choice_header(line: str) -> bool:
+def scene_choice_header_kind(line: str) -> str | None:
+    """Identify the two scene-choice command forms seen in ADVSCRIPT2."""
     body, _ = split_line_ending(line)
-    return body.lstrip(";:") == "選択肢"
+    marker = body.lstrip(";:")
+    if marker == "選択肢":
+        return "lines"
+    if marker == "選択肢へ":
+        return "quoted"
+    return None
 
 
-def parse_scene_choice_lines(text: str) -> list[tuple[int, str, str, str]] | None:
+def parse_quoted_choice_row(line: str, line_offset: int) -> list[ChoiceSpan] | None:
+    """Parse a slash-separated row such as 「A」/「B」 without losing delimiters."""
+    pairs = {"「": "」", '"': '"', "『": "』"}
+    spans: list[ChoiceSpan] = []
+    pos = 0
+    length = len(line)
+
+    while pos < length:
+        while pos < length and line[pos].isspace():
+            pos += 1
+        if pos >= length:
+            break
+
+        opener = line[pos]
+        closer = pairs.get(opener)
+        if closer is None:
+            return None
+        value_start = pos + 1
+        value_end = line.find(closer, value_start)
+        if value_end < 0:
+            return None
+        value = line[value_start:value_end]
+        if not value:
+            return None
+        spans.append(ChoiceSpan(line_offset + value_start, line_offset + value_end, value))
+        pos = value_end + 1
+
+        while pos < length and line[pos].isspace():
+            pos += 1
+        if pos == length:
+            break
+        if line[pos] not in ("/", "／"):
+            return None
+        pos += 1
+
+    return spans if len(spans) >= 2 else None
+
+
+def parse_scene_choice_spans(text: str) -> list[ChoiceSpan] | None:
+    """Find editable option text while retaining prefixes, quotes and separators."""
     lines = text.splitlines(True)
-    if not lines or not is_scene_choice_header(lines[0]):
+    if not lines:
         return None
 
-    choices: list[tuple[int, str, str, str]] = []
-    for line_index, line in enumerate(lines[1:], 1):
-        body, ending = split_line_ending(line)
-        if not body:
-            continue
-        prefix = body[0] if body[0] in ";:" else ""
-        choice = body[1:] if prefix else body
-        if choice:
-            choices.append((line_index, prefix, choice, ending))
+    kind = scene_choice_header_kind(lines[0])
+    if kind is None:
+        return None
+
+    offset = len(lines[0])
+    choices: list[ChoiceSpan] = []
+    for line in lines[1:]:
+        body, _ending = split_line_ending(line)
+        if kind == "lines":
+            if body:
+                prefix_length = 1 if body[0] in ";:" else 0
+                value = body[prefix_length:]
+                if value:
+                    choices.append(
+                        ChoiceSpan(offset + prefix_length, offset + len(body), value)
+                    )
+        else:
+            parsed = parse_quoted_choice_row(body, offset)
+            if parsed is not None:
+                # A quoted row is a single option declaration; do not absorb later commands.
+                return parsed
+        offset += len(line)
+
     return choices or None
 
 
-def scene_choices(record: Record, encoding: str) -> tuple[str, str, list[tuple[int, str, str, str]]] | None:
+def scene_choices(record: Record, encoding: str) -> tuple[str, str, list[ChoiceSpan]] | None:
+    """Locate a real choice block in arg[31] or main, not merely any nonempty field.
+
+    arg[31] is the primary location in the tested scripts, but some variants
+    store the command in main instead. Prefer arg[31] when both are valid.
+    """
     if not is_scene_record(record):
         return None
-    source = scene_source(record, encoding)
-    if source is None:
-        return None
-    field_name, text = source
-    parsed = parse_scene_choice_lines(text)
-    if parsed is None:
-        return None
-    return field_name, text, parsed
+
+    for field_name, raw in (("arg31", record.args[31]), ("main", record.main)):
+        if not has_content(raw):
+            continue
+        text = decode_field(raw, encoding, f"scene {field_name}")
+        parsed = parse_scene_choice_spans(text)
+        if parsed is not None:
+            return field_name, text, parsed
+    return None
 
 
-def replace_scene_choice_text(text: str, choices: list[str]) -> str:
-    lines = text.splitlines(True)
-    parsed = parse_scene_choice_lines(text)
-    if parsed is None:
+def replace_scene_choice_text(
+    text: str, choices: list[str], parsed: list[ChoiceSpan] | None = None
+) -> str:
+    spans = parsed if parsed is not None else parse_scene_choice_spans(text)
+    if spans is None:
         raise ScriptError("internal error: record is not a scene choice block")
-    if len(parsed) != len(choices):
+    if len(spans) != len(choices):
         raise ScriptError("internal error: scene choice count changed")
 
-    for choice, (line_index, prefix, _old, ending) in zip(choices, parsed):
+    output: list[str] = []
+    cursor = 0
+    for choice, span in zip(choices, spans):
         if "\r" in choice or "\n" in choice:
             raise ScriptError("a single choice item cannot contain a line break")
-        lines[line_index] = f"{prefix}{choice}{ending}"
-    return "".join(lines)
+        if span.start < cursor or span.end < span.start:
+            raise ScriptError("internal error: invalid scene choice span")
+        output.append(text[cursor:span.start])
+        output.append(choice)
+        cursor = span.end
+    output.append(text[cursor:])
+    return "".join(output)
 
 
 def is_choice_record(record: Record, encoding: str) -> bool:
@@ -303,22 +397,112 @@ def extract_choice_targets(record: Record, encoding: str) -> list[tuple[str, int
     return results
 
 
-def make_text_main(name: str, message: str, old_main: str) -> str | None:
-    """Rebuild only the known dialogue-display command; leave other main data alone."""
-    old_lines = old_main.splitlines()
-    if not old_lines or not old_lines[0].startswith("[テキスト表示]"):
+def normalize_line_breaks_with_offsets(text: str) -> tuple[str, list[int]]:
+    """Collapse adjacent line-break characters and retain source-end offsets."""
+    normalized: list[str] = []
+    offsets: list[int] = []
+    index = 0
+    while index < len(text):
+        if text[index] in "\r\n":
+            end = index + 1
+            while end < len(text) and text[end] in "\r\n":
+                end += 1
+            normalized.append("\n")
+            offsets.append(end)
+            index = end
+        else:
+            normalized.append(text[index])
+            offsets.append(index + 1)
+            index += 1
+    return "".join(normalized), offsets
+
+
+def trailing_line_break_units(text: str) -> tuple[int, int]:
+    """Return (start, count) for trailing CR/LF units; CRLF is one unit."""
+    index = len(text)
+    count = 0
+    while index > 0 and text[index - 1] in "\r\n":
+        if index >= 2 and text[index - 2:index] == "\r\n":
+            index -= 2
+        else:
+            index -= 1
+        count += 1
+    return index, count
+
+
+def consume_line_break_units(text: str, start: int, count: int) -> int:
+    """Consume an exact number of CRLF/CR/LF units from text[start:]."""
+    index = start
+    for _ in range(count):
+        if text[index:index + 2] == "\r\n":
+            index += 2
+        elif index < len(text) and text[index] in "\r\n":
+            index += 1
+        else:
+            raise ScriptError(
+                "cannot safely locate the end of the original dialogue text; "
+                "refusing to discard unknown trailing data"
+            )
+    return index
+
+
+def make_text_main(
+    name: str, old_name: str, message: str, old_message: str, old_main: str
+) -> str | None:
+    """Update dialogue text while preserving the original command header and tail."""
+    header, separator, old_body = old_main.partition("\n")
+    if not header.startswith("[テキスト表示]"):
         return None
+    if not separator:
+        raise ScriptError("cannot safely update dialogue: command body is missing")
 
-    voice = ""
-    for part in old_lines[0].split()[1:]:
-        if "\\" in part or "/" in part:
-            voice = part
-            break
+    # Preserve the complete original header, including non-path voice IDs and spacing.
+    # Only replace the exact speaker substring when the speaker was edited.
+    first = header
+    if name != old_name:
+        command = "[テキスト表示]"
+        header_rest = header[len(command):]
+        if old_name:
+            speaker_pos = header.find(old_name, len(command))
+            if speaker_pos < 0:
+                raise ScriptError(
+                    "cannot safely locate the original speaker in the command header"
+                )
+            first = header[:speaker_pos] + name + header[speaker_pos + len(old_name):]
+        else:
+            first = command + " " + name + header_rest
 
-    first = f"[テキスト表示] {name} {voice}".rstrip()
-    # The source command uses LF even when the argument's message contains CRLF.
-    display_message = message.replace("\r\n", "\n")
-    return f"{first}\n{display_message}\n\n"
+    normalized_body, body_offsets = normalize_line_breaks_with_offsets(old_body)
+    normalized_message, _message_offsets = normalize_line_breaks_with_offsets(old_message)
+    if not normalized_body.startswith(normalized_message):
+        raise ScriptError(
+            "cannot safely locate the original dialogue text in the command; "
+            "refusing to discard unknown trailing data"
+        )
+
+    # Most scripts differ only in whether internal line breaks are CR, LF or CRLF.
+    # When args[1] itself ends in line breaks, consume exactly those units from main;
+    # any additional line breaks belong to the command tail and must remain intact.
+    trailing_start, trailing_count = trailing_line_break_units(old_message)
+    if trailing_count:
+        content_prefix, _ = normalize_line_breaks_with_offsets(old_message[:trailing_start])
+        normalized_content, _ = normalize_line_breaks_with_offsets(old_body)
+        if not normalized_content.startswith(content_prefix):
+            raise ScriptError(
+                "cannot safely locate the original dialogue text in the command; "
+                "refusing to discard unknown trailing data"
+            )
+        raw_content_end = (
+            body_offsets[len(content_prefix) - 1] if content_prefix else 0
+        )
+        raw_end = consume_line_break_units(old_body, raw_content_end, trailing_count)
+    else:
+        raw_end = body_offsets[len(normalized_message) - 1] if normalized_message else 0
+    tail = old_body[raw_end:]
+
+    # The source command uses LF even when the argument message contains CRLF.
+    display_message = message.replace("\r\n", "\n").replace("\r", "\n")
+    return f"{first}\n{display_message}{tail}"
 
 
 def export_items(script: Script, encoding: str, source_name: str) -> list[dict[str, str]]:
@@ -336,8 +520,8 @@ def export_items(script: Script, encoding: str, source_name: str) -> list[dict[s
 
         parsed_scene = scene_choices(record, encoding)
         if parsed_scene is not None:
-            for _line_index, _prefix, choice, _ending in parsed_scene[2]:
-                items.append({"choice": choice})
+            for choice in parsed_scene[2]:
+                items.append({"choice": choice.value})
             continue
 
         if is_choice_record(record, encoding):
@@ -374,6 +558,8 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
             message = item["message"]
             if not isinstance(name, str) or not isinstance(message, str):
                 raise ScriptError(f"JSON item {item_index} in {source_name} has invalid text fields")
+            if "\r" in name or "\n" in name:
+                raise ScriptError("speaker names cannot contain line breaks")
 
             if name != old_name:
                 record.args[0] = encode_field(name, encoding, record.args[0].endswith(b"\0"))
@@ -383,7 +569,13 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
                 record_changed = True
 
             if record_changed:
-                new_main = make_text_main(name, message, decode_field(record.main, encoding, f"{context} main"))
+                new_main = make_text_main(
+                    name,
+                    old_name,
+                    message,
+                    old_message,
+                    decode_field(record.main, encoding, f"{context} main"),
+                )
                 if new_main is not None:
                     record.main = encode_field(new_main, encoding, record.main.endswith(b"\0"))
             item_index += 1
@@ -393,17 +585,37 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
             if parsed_scene is not None:
                 field_name, old_text, parsed = parsed_scene
                 new_choices: list[str] = []
-                for _line_index, _prefix, _old_choice, _ending in parsed:
+                for _span in parsed:
                     item = take_item(items, item_index, "choice", source_name)
                     new_choices.append(item["choice"])
                     item_index += 1
 
-                updated = replace_scene_choice_text(old_text, new_choices)
+                updated = replace_scene_choice_text(old_text, new_choices, parsed)
                 if updated != old_text:
                     if field_name == "arg31":
-                        record.args[31] = encode_field(updated, encoding, record.args[31].endswith(b"\0"))
+                        raw = record.args[31]
+                        record.args[31] = encode_field(updated, encoding, raw.endswith(b"\0"))
+                        # Some script records mirror the same scene command in main.
+                        main_text = decode_field(record.main, encoding, f"{context} main")
+                        main_choices = parse_scene_choice_spans(main_text)
+                        if main_choices is not None and len(main_choices) == len(new_choices):
+                            main_updated = replace_scene_choice_text(main_text, new_choices, main_choices)
+                            if main_updated != main_text:
+                                record.main = encode_field(
+                                    main_updated, encoding, record.main.endswith(b"\0")
+                                )
                     else:
-                        record.main = encode_field(updated, encoding, record.main.endswith(b"\0"))
+                        raw = record.main
+                        record.main = encode_field(updated, encoding, raw.endswith(b"\0"))
+                        # Keep arg31 synchronized when it contains the same choice block.
+                        arg_text = decode_field(record.args[31], encoding, f"{context} arg 31")
+                        arg_choices = parse_scene_choice_spans(arg_text)
+                        if arg_choices is not None and len(arg_choices) == len(new_choices):
+                            arg_updated = replace_scene_choice_text(arg_text, new_choices, arg_choices)
+                            if arg_updated != arg_text:
+                                record.args[31] = encode_field(
+                                    arg_updated, encoding, record.args[31].endswith(b"\0")
+                                )
                     record_changed = True
 
             elif is_choice_record(record, encoding):
@@ -546,14 +758,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        encoding = validate_encoding(args.encoding)
         if args.export:
             if len(args.paths) != 2:
                 parser.error("export requires exactly: input_path output_path")
-            export_path(Path(args.paths[0]), Path(args.paths[1]), args.encoding)
+            export_path(Path(args.paths[0]), Path(args.paths[1]), encoding)
         else:
             if len(args.paths) != 3:
                 parser.error("import requires exactly: original_path json_path output_path")
-            import_path(Path(args.paths[0]), Path(args.paths[1]), Path(args.paths[2]), args.encoding)
+            import_path(Path(args.paths[0]), Path(args.paths[1]), Path(args.paths[2]), encoding)
     except (OSError, UnicodeError, ScriptError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
