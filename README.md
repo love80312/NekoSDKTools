@@ -1,4 +1,4 @@
-# NekoSDKTools（個人優化版）
+# NekoSDKTools（個人優化版 byＡＩ）
 
 用於 NekoSDK／Waffle 遊戲資源的個人工具組，涵蓋 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本，以及 BMP+ALP 圖像。
 
