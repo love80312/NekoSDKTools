@@ -89,21 +89,23 @@ class NekoSDKToolsGUI:
         ttk.Button(toolbar, text="清除記錄", command=self.clear_log).pack(side="right")
         log_body = ttk.Frame(log_frame)
         log_body.pack(fill="both", expand=True)
-        self.log_text = tk.Text(log_body, height=10, wrap="none", font=("Consolas", 9),
-                                state="disabled", undo=False)
+        # Character wrapping also wraps long paths and command lines without spaces.
+        self.log_text = tk.Text(
+            log_body, height=10, wrap="char", font=("Consolas", 9),
+            state="disabled", undo=False,
+        )
         yscroll = ttk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
-        xscroll = ttk.Scrollbar(log_frame, orient="horizontal", command=self.log_text.xview)
-        self.log_text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.log_text.configure(yscrollcommand=yscroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
-        xscroll.pack(fill="x")
 
         footer = ttk.Frame(outer)
         footer.pack(fill="x", pady=(8, 0))
         self.progress = ttk.Progressbar(footer, mode="indeterminate")
         self.progress.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.cancel_button = ttk.Button(footer, text="停止工作", command=self.stop_process,
-                                        state="disabled")
+        self.cancel_button = ttk.Button(
+            footer, text="停止工作", command=self.stop_process, state="disabled"
+        )
         self.cancel_button.pack(side="right")
 
     # ---------- Common UI and process helpers ----------
@@ -131,8 +133,9 @@ class NekoSDKToolsGUI:
             else:
                 widget.grid_remove()
 
-    def _row_buttons(self, label_widget: ttk.Label, row: int,
-                     file_enabled: bool, folder_enabled: bool) -> None:
+    def _row_buttons(
+        self, label_widget: ttk.Label, row: int, file_enabled: bool, folder_enabled: bool
+    ) -> None:
         widgets = self.row_widgets.get((label_widget.master, row), [])
         if len(widgets) == 4:
             widgets[2].configure(state="normal" if file_enabled else "disabled")
@@ -169,7 +172,9 @@ class NekoSDKToolsGUI:
     def _validate_tool(self, key: str) -> Path:
         path = self.tool_dir / TOOL_FILES[key]
         if not path.is_file():
-            raise ValueError(f"找不到工具檔案：\n{path}\n\n請將 GUI.py 與三支工具程式放在同一個資料夾。")
+            raise ValueError(
+                f"找不到工具檔案：\n{path}\n\n請將 GUI.py 與三支工具程式放在同一個資料夾。"
+            )
         return path
 
     def _confirm_output(self, path: Path, label: str) -> bool:
@@ -183,13 +188,18 @@ class NekoSDKToolsGUI:
             if not nonempty:
                 return True
             return messagebox.askyesno(
-                "確認覆寫", f"{label}已存在且不是空資料夾：\n{path}\n\n可能覆蓋其中同名檔案，是否繼續？",
+                "確認覆寫",
+                f"{label}已存在且不是空資料夾：\n{path}\n\n可能覆蓋其中同名檔案，是否繼續？",
                 parent=self.root,
             )
-        return messagebox.askyesno("確認覆寫", f"{label}已存在：\n{path}\n\n是否覆蓋？", parent=self.root)
+        return messagebox.askyesno(
+            "確認覆寫", f"{label}已存在：\n{path}\n\n是否覆蓋？", parent=self.root
+        )
 
-    def _start(self, key: str, args: list[str], *, env_values: dict[str, str] | None = None,
-               output_path: Path | None = None) -> None:
+    def _start(
+        self, key: str, args: list[str], *, env_values: dict[str, str] | None = None,
+        output_path: Path | None = None,
+    ) -> None:
         if self.running:
             return
         tool = self._validate_tool(key)
@@ -210,7 +220,9 @@ class NekoSDKToolsGUI:
         self._append_log("\n" + "=" * 72 + "\n")
         self._append_log("執行指令：\n" + subprocess.list2cmdline(command) + "\n")
         if env_values:
-            self._append_log("環境設定：" + ", ".join(f"{k}={v}" for k, v in env_values.items()) + "\n")
+            self._append_log(
+                "環境設定：" + ", ".join(f"{k}={v}" for k, v in env_values.items()) + "\n"
+            )
 
         def worker() -> None:
             code = -1
@@ -232,7 +244,9 @@ class NekoSDKToolsGUI:
             finally:
                 self.events.put(("finished", (code, output_path)))
 
-        self.worker = threading.Thread(target=worker, name="NekoSDKToolsWorker", daemon=True)
+        self.worker = threading.Thread(
+            target=worker, name="NekoSDKToolsWorker", daemon=True
+        )
         self.worker.start()
 
     def _append_log(self, value: str) -> None:
@@ -308,7 +322,9 @@ class NekoSDKToolsGUI:
 
     def on_close(self) -> None:
         if self.running:
-            if not messagebox.askyesno("結束程式", "目前仍有工作執行中。確定停止並關閉？", parent=self.root):
+            if not messagebox.askyesno(
+                "結束程式", "目前仍有工作執行中。確定停止並關閉？", parent=self.root
+            ):
                 return
             if self.process is not None and self.process.poll() is None:
                 self.cancel_requested = True
@@ -327,10 +343,14 @@ class NekoSDKToolsGUI:
 
         mode_box = ttk.LabelFrame(frame, text="操作")
         mode_box.pack(fill="x", pady=(0, 10))
-        ttk.Radiobutton(mode_box, text="解包：PAK → 資料夾", variable=self.pak_mode,
-                        value="unpack", command=self._pak_mode_changed).pack(side="left", padx=8, pady=4)
-        ttk.Radiobutton(mode_box, text="重包：資料夾 → PAK", variable=self.pak_mode,
-                        value="pack", command=self._pak_mode_changed).pack(side="left", padx=8, pady=4)
+        ttk.Radiobutton(
+            mode_box, text="解包：PAK → 資料夾", variable=self.pak_mode,
+            value="unpack", command=self._pak_mode_changed,
+        ).pack(side="left", padx=8, pady=4)
+        ttk.Radiobutton(
+            mode_box, text="重包：資料夾 → PAK", variable=self.pak_mode,
+            value="pack", command=self._pak_mode_changed,
+        ).pack(side="left", padx=8, pady=4)
 
         paths = ttk.LabelFrame(frame, text="來源與輸出")
         paths.pack(fill="x", pady=(0, 10))
@@ -384,7 +404,8 @@ class NekoSDKToolsGUI:
 
     def _pak_pick_input_file(self) -> None:
         value = filedialog.askopenfilename(
-            title="選擇 NekoSDK PAK", filetypes=[("NekoSDK PAK", "*.pak"), ("所有檔案", "*.*")]
+            title="選擇 NekoSDK PAK",
+            filetypes=[("NekoSDK PAK", "*.pak"), ("所有檔案", "*.*")],
         )
         if value:
             self.pak_input.set(value)
@@ -448,7 +469,9 @@ class NekoSDKToolsGUI:
                     raise ValueError("來源資料夾包含符號連結；請先移除符號連結。")
                 file_count = sum(1 for path in source_files if path.is_file())
                 if file_count != 1:
-                    raise ValueError(f"NEKOPACK4S 只能包含一個檔案，目前找到 {file_count} 個。")
+                    raise ValueError(
+                        f"NEKOPACK4S 只能包含一個檔案，目前找到 {file_count} 個。"
+                    )
 
             try:
                 level = int(self.pak_level.get())
@@ -474,16 +497,21 @@ class NekoSDKToolsGUI:
         self.scr_json = tk.StringVar()
         self.scr_output = tk.StringVar()
         self.scr_encoding = tk.StringVar(value="cp932")
-        self.scr_dialogue_encoding = tk.StringVar(value="cp932")
+        # This repository's translated script mixes CP932 command text and GBK dialogue.
+        self.scr_dialogue_encoding = tk.StringVar(value="auto")
         self.scr_output_auto = True
         self.scr_source.trace_add("write", lambda *_: self._scr_source_changed())
 
         mode_box = ttk.LabelFrame(frame, text="操作")
         mode_box.pack(fill="x", pady=(0, 10))
-        ttk.Radiobutton(mode_box, text="匯出：腳本 → JSON", variable=self.scr_mode,
-                        value="export", command=self._scr_mode_changed).pack(side="left", padx=8, pady=4)
-        ttk.Radiobutton(mode_box, text="匯入：JSON → 腳本", variable=self.scr_mode,
-                        value="import", command=self._scr_mode_changed).pack(side="left", padx=8, pady=4)
+        ttk.Radiobutton(
+            mode_box, text="匯出：腳本 → JSON", variable=self.scr_mode,
+            value="export", command=self._scr_mode_changed,
+        ).pack(side="left", padx=8, pady=4)
+        ttk.Radiobutton(
+            mode_box, text="匯入：JSON → 腳本", variable=self.scr_mode,
+            value="import", command=self._scr_mode_changed,
+        ).pack(side="left", padx=8, pady=4)
 
         paths = ttk.LabelFrame(frame, text="來源與輸出")
         paths.pack(fill="x", pady=(0, 10))
@@ -505,22 +533,35 @@ class NekoSDKToolsGUI:
 
         encoding = ttk.LabelFrame(frame, text="腳本字串編碼")
         encoding.pack(fill="x", pady=(0, 10))
-        values = ("cp932", "shift_jis", "utf-8", "utf-8-sig", "gbk", "big5")
-        ttk.Label(encoding, text="指令／場景：").grid(row=0, column=0, sticky="w", padx=(4, 5), pady=4)
-        ttk.Combobox(encoding, textvariable=self.scr_encoding, width=14, values=values).grid(
-            row=0, column=1, sticky="w", pady=4
+        command_values = ("cp932", "shift_jis", "utf-8", "utf-8-sig", "gbk", "big5")
+        dialogue_values = ("auto", "cp932", "shift_jis", "utf-8", "utf-8-sig", "gbk", "big5")
+        ttk.Label(encoding, text="指令／場景：").grid(
+            row=0, column=0, sticky="w", padx=(4, 5), pady=4
         )
-        ttk.Label(encoding, text="對話／說話者：").grid(row=0, column=2, sticky="w", padx=(18, 5), pady=4)
-        ttk.Combobox(encoding, textvariable=self.scr_dialogue_encoding, width=14, values=values).grid(
-            row=0, column=3, sticky="w", pady=4
+        self.scr_encoding_box = ttk.Combobox(
+            encoding, textvariable=self.scr_encoding, width=14, values=command_values
         )
+        self.scr_encoding_box.grid(row=0, column=1, sticky="w", pady=4)
+        ttk.Label(encoding, text="對話／說話者：").grid(
+            row=0, column=2, sticky="w", padx=(18, 5), pady=4
+        )
+        self.scr_dialogue_encoding_box = ttk.Combobox(
+            encoding, textvariable=self.scr_dialogue_encoding, width=14,
+            values=dialogue_values,
+        )
+        self.scr_dialogue_encoding_box.grid(row=0, column=3, sticky="w", pady=4)
         ttk.Label(
             encoding,
-            text="兩者預設 CP932。日文指令搭配 GBK 中文對話時，可設定指令／場景 CP932、對話／說話者 GBK。JSON 固定使用 UTF-8。",
+            text=(
+                "對話編碼預設 auto：依主欄位比對辨識 CP932 日文文字，其餘對話使用 GBK。"
+                "其他遊戲可改選固定編碼。指令／場景預設 CP932；JSON 固定使用 UTF-8。"
+            ),
             style="Hint.TLabel", wraplength=880,
         ).grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=(2, 4))
 
-        self.scr_run_button = ttk.Button(frame, text="開始匯出 JSON", style="Run.TButton", command=self.run_scr)
+        self.scr_run_button = ttk.Button(
+            frame, text="開始匯出 JSON", style="Run.TButton", command=self.run_scr
+        )
         self.scr_run_button.pack(anchor="w")
         self.start_buttons.append(self.scr_run_button)
         ttk.Label(
@@ -533,8 +574,12 @@ class NekoSDKToolsGUI:
     def _scr_mode_changed(self) -> None:
         exporting = self.scr_mode.get() == "export"
         self._show_row(self.scr_json_label, 1, not exporting)
-        self.scr_output_label.configure(text="輸出 JSON／資料夾：" if exporting else "輸出腳本／資料夾：")
-        self.scr_run_button.configure(text="開始匯出 JSON" if exporting else "開始匯入腳本")
+        self.scr_output_label.configure(
+            text="輸出 JSON／資料夾：" if exporting else "輸出腳本／資料夾："
+        )
+        self.scr_run_button.configure(
+            text="開始匯出 JSON" if exporting else "開始匯入腳本"
+        )
         self._scr_apply_default_output()
 
     def _scr_source_changed(self) -> None:
@@ -551,7 +596,8 @@ class NekoSDKToolsGUI:
 
     def _scr_default_output(self, source: Path) -> Path:
         if source.is_dir():
-            return source.with_name(source.name + ("_json" if self.scr_mode.get() == "export" else "_imported"))
+            suffix = "_json" if self.scr_mode.get() == "export" else "_imported"
+            return source.with_name(source.name + suffix)
         if self.scr_mode.get() == "export":
             return source.with_suffix(".json")
         return source.with_name(source.stem + "_imported" + source.suffix)
@@ -574,7 +620,10 @@ class NekoSDKToolsGUI:
             self.scr_output.set(str(self._scr_default_output(Path(value))))
 
     def _scr_pick_json_file(self) -> None:
-        value = filedialog.askopenfilename(title="選擇翻譯 JSON", filetypes=[("JSON", "*.json"), ("所有檔案", "*.*")])
+        value = filedialog.askopenfilename(
+            title="選擇翻譯 JSON",
+            filetypes=[("JSON", "*.json"), ("所有檔案", "*.*")],
+        )
         if value:
             self.scr_json.set(value)
 
@@ -586,7 +635,8 @@ class NekoSDKToolsGUI:
     def _scr_pick_output_file(self) -> None:
         exporting = self.scr_mode.get() == "export"
         value = filedialog.asksaveasfilename(
-            title="設定輸出檔案", defaultextension=".json" if exporting else ".txt",
+            title="設定輸出檔案",
+            defaultextension=".json" if exporting else ".txt",
             filetypes=[("JSON", "*.json"), ("所有檔案", "*.*")] if exporting
             else [("腳本／TXT", "*.txt"), ("所有檔案", "*.*")],
         )
@@ -607,6 +657,13 @@ class NekoSDKToolsGUI:
             dialogue_encoding = self.scr_dialogue_encoding.get().strip()
             if not command_encoding or not dialogue_encoding:
                 raise ValueError("請指定指令／場景及對話／說話者編碼。")
+            if dialogue_encoding.casefold() == "auto":
+                if command_encoding.casefold().replace("-", "_") not in {
+                    "cp932", "932", "shift_jis", "shiftjis", "sjis"
+                }:
+                    raise ValueError(
+                        "對話編碼選擇 auto 時，指令／場景編碼必須使用 CP932。"
+                    )
             if not self.scr_source.get().strip():
                 raise ValueError("請指定原始腳本或資料夾。")
             source = self._resolved(self.scr_source.get())
@@ -637,8 +694,10 @@ class NekoSDKToolsGUI:
                 raise ValueError("輸出路徑不能與來源相同，也不能放在來源資料夾內。")
 
             if self.scr_mode.get() == "export":
-                args = ["-e", str(source), str(output), "--encoding", command_encoding,
-                        "--dialogue-encoding", dialogue_encoding]
+                args = [
+                    "-e", str(source), str(output), "--encoding", command_encoding,
+                    "--dialogue-encoding", dialogue_encoding,
+                ]
             else:
                 if not self.scr_json.get().strip():
                     raise ValueError("匯入時請指定 JSON 檔案或資料夾。")
@@ -649,8 +708,10 @@ class NekoSDKToolsGUI:
                     raise ValueError("來源是單一檔案時，翻譯 JSON 也必須指定單一檔案。")
                 if mode == "folder" and (json_path == source or self._is_inside(json_path, source)):
                     raise ValueError("JSON 資料夾不能放在原始腳本資料夾內。")
-                args = ["-i", str(source), str(json_path), str(output), "--encoding", command_encoding,
-                        "--dialogue-encoding", dialogue_encoding]
+                args = [
+                    "-i", str(source), str(json_path), str(output), "--encoding", command_encoding,
+                    "--dialogue-encoding", dialogue_encoding,
+                ]
 
             if mode == "file":
                 output.parent.mkdir(parents=True, exist_ok=True)
@@ -693,7 +754,9 @@ class NekoSDKToolsGUI:
             paths, 2, "PNG 輸出資料夾：", self.bmp_output,
             self._bmp_pick_output_file, self._bmp_pick_output_folder,
         )
-        self.bmp_run_button = ttk.Button(frame, text="開始轉換", style="Run.TButton", command=self.run_bmp)
+        self.bmp_run_button = ttk.Button(
+            frame, text="開始轉換", style="Run.TButton", command=self.run_bmp
+        )
         self.bmp_run_button.pack(anchor="w")
         self.start_buttons.append(self.bmp_run_button)
         ttk.Label(
@@ -714,9 +777,13 @@ class NekoSDKToolsGUI:
     def _bmp_mode_changed(self, _event=None) -> None:
         mode = self._bmp_mode_key()
         descriptions = {
-            "extract_folder": ("批次合併 BMP + ALP → PNG", "BMP+ALP 資料夾：", "ALP：不需要", "PNG 輸出資料夾："),
+            "extract_folder": (
+                "批次合併 BMP + ALP → PNG", "BMP+ALP 資料夾：", "ALP：不需要", "PNG 輸出資料夾："
+            ),
             "extract_single": ("單組合併 BMP + ALP → 圖片", "BMP 檔案：", "ALP 檔案：", "輸出圖片："),
-            "create_folder": ("批次拆分圖片 → BMP + ALP", "圖片資料夾：", "ALP：不需要", "BMP+ALP 輸出資料夾："),
+            "create_folder": (
+                "批次拆分圖片 → BMP + ALP", "圖片資料夾：", "ALP：不需要", "BMP+ALP 輸出資料夾："
+            ),
             "create_single": ("單張圖片拆分 → BMP + ALP", "來源圖片：", "ALP：自動產生", "輸出 BMP 檔案："),
         }
         desc, source_label, alp_label, output_label = descriptions[mode]
@@ -727,20 +794,27 @@ class NekoSDKToolsGUI:
         self._show_row(self.bmp_alp_label, 1, mode == "extract_single")
         single = mode in {"extract_single", "create_single"}
         self._row_buttons(self.bmp_source_label, 0, file_enabled=single, folder_enabled=not single)
-        self._row_buttons(self.bmp_alp_label, 1, file_enabled=mode == "extract_single", folder_enabled=False)
+        self._row_buttons(
+            self.bmp_alp_label, 1, file_enabled=mode == "extract_single", folder_enabled=False
+        )
         self._row_buttons(self.bmp_output_label, 2, file_enabled=single, folder_enabled=not single)
 
     def _bmp_pick_source_file(self) -> None:
         mode = self._bmp_mode_key()
         if mode == "extract_single":
-            value = filedialog.askopenfilename(title="選擇 BMP 檔案", filetypes=[("BMP", "*.bmp"), ("所有檔案", "*.*")])
+            value = filedialog.askopenfilename(
+                title="選擇 BMP 檔案", filetypes=[("BMP", "*.bmp"), ("所有檔案", "*.*")]
+            )
             if value:
                 path = Path(value)
                 self.bmp_source.set(value)
                 self.bmp_alp.set(str(path.with_suffix(".alp")))
                 self.bmp_output.set(str(path.with_suffix(".png")))
         elif mode == "create_single":
-            value = filedialog.askopenfilename(title="選擇來源圖片", filetypes=[("支援的圖片", IMAGE_TYPES), ("所有檔案", "*.*")])
+            value = filedialog.askopenfilename(
+                title="選擇來源圖片",
+                filetypes=[("支援的圖片", IMAGE_TYPES), ("所有檔案", "*.*")],
+            )
             if value:
                 self.bmp_source.set(value)
                 self.bmp_output.set(str(Path(value).with_suffix(".bmp")))
@@ -754,7 +828,9 @@ class NekoSDKToolsGUI:
             self.bmp_output.set(str(path.with_name(path.name + suffix)))
 
     def _bmp_pick_alp_file(self) -> None:
-        value = filedialog.askopenfilename(title="選擇 ALP 檔案", filetypes=[("ALP", "*.alp"), ("所有檔案", "*.*")])
+        value = filedialog.askopenfilename(
+            title="選擇 ALP 檔案", filetypes=[("ALP", "*.alp"), ("所有檔案", "*.*")]
+        )
         if value:
             self.bmp_alp.set(value)
 
@@ -767,7 +843,9 @@ class NekoSDKToolsGUI:
             types, extension = [("支援的圖片", IMAGE_TYPES), ("所有檔案", "*.*")], ".png"
         else:
             types, extension = [("BMP", "*.bmp"), ("所有檔案", "*.*")], ".bmp"
-        value = filedialog.asksaveasfilename(title="設定輸出檔案", defaultextension=extension, filetypes=types)
+        value = filedialog.asksaveasfilename(
+            title="設定輸出檔案", defaultextension=extension, filetypes=types
+        )
         if value:
             self.bmp_output.set(value)
 
@@ -794,7 +872,9 @@ class NekoSDKToolsGUI:
                 if not self.bmp_output.get().strip():
                     raise ValueError("請指定輸出圖片路徑。")
                 output = self._resolved(self.bmp_output.get())
-                if output.suffix.lower() not in {".png", ".tga", ".bmp", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
+                if output.suffix.lower() not in {
+                    ".png", ".tga", ".bmp", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"
+                }:
                     raise ValueError("輸出圖片副檔名不受支援。")
                 if output in (bmp, alp):
                     raise ValueError("輸出圖片不能覆蓋來源 BMP 或 ALP。")
