@@ -1,29 +1,39 @@
-# NekoSDKTools（個人優化版 byＡＩ）
+# NekoSDKTools
 
-用於 NekoSDK／Waffle 遊戲資源的個人工具組，涵蓋 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本，以及 BMP+ALP 圖像。
+NekoSDK／Waffle 遊戲資源的個人工具組，提供 **NEKOPACK4A／4S 封包處理、NEKOSDK_ADVSCRIPT2 腳本文字匯出／匯入，以及 BMP／ALP 圖像轉換**。
 
-> 本專案不是通用的 PAK／TXT 解包工具。只有符合對應格式的檔案，才能使用相關功能。修改後資源仍須在實際遊戲中測試。
+> 本專案不是通用 PAK 解包器，也不是一般 TXT 編輯器。只有符合本工具所支援資料格式的檔案才能處理。修改前請備份原始資源；工具處理成功不代表遊戲一定能載入，仍須以實際遊戲測試。
 
-## 工具功能
+## 目錄
 
-| 檔案 | 功能 |
-|---|---|
-| `GUI.py` | Tkinter 圖形介面，整合封包、腳本及圖像操作 |
-| `pak.py` | 解包 NEKOPACK4A／NEKOPACK4S；重包時可選擇 4A 或 4S |
-| `scr.py` | 讀取 NEKOSDK_ADVSCRIPT2 腳本，將可辨識的對話／選項匯出為 UTF-8 JSON，並可匯入修改內容 |
-| `bmp_alp.py` | 合併 BMP+ALP 為一般 RGBA 圖片，或將一般圖片拆成 BMP+ALP |
-| `requirements.txt` | 列出圖像工具使用的 Pillow 依賴 |
+- [功能與檔案](#功能與檔案)
+- [環境需求與啟動](#環境需求與啟動)
+- [建議工作流程](#建議工作流程)
+- [1. PAK 封包：解包與重包](#1-pak-封包解包與重包)
+- [2. ADVSCRIPT2 腳本與 JSON](#2-advscript2-腳本與-json)
+- [3. BMP／ALP 圖像轉換](#3-bmpalp-圖像轉換)
+- [測試素材與驗證紀錄](#測試素材與驗證紀錄)
+- [限制與注意事項](#限制與注意事項)
+
+## 功能與檔案
+
+| 檔案 | 功能 | 相依套件 |
+|---|---|---|
+| `GUI.py` | Tkinter 圖形介面，整合 PAK、腳本／JSON、BMP／ALP 三組操作 | Python、Tkinter |
+| `pak.py` | 解包 NEKOPACK4A／4S；重包時可指定 4A 或 4S | Python 標準函式庫 |
+| `scr.py` | 解析 NEKOSDK_ADVSCRIPT2，匯出可辨識的對話／選項至 UTF-8 JSON，並將 JSON 匯回腳本 | Python 標準函式庫 |
+| `bmp_alp.py` | 合併 BMP+ALP 為一般 RGBA 圖片，或將圖片拆成 BMP+ALP | Pillow |
+| `requirements.txt` | 列出圖像轉換所需套件 | — |
+| `TEST/` | 範例 PAK 與腳本素材 | — |
 
 ## 環境需求與啟動
 
-- Python 3.10 以上版本。
-- 使用圖形介面需要 Tkinter；Windows 版 Python 安裝時需包含 Tcl/Tk。
-- `pak.py` 與 `scr.py` 使用 Python 標準函式庫，不需要額外套件。
-- `bmp_alp.py` 需要 Pillow 10.0 以上版本。
+- Python **3.10 以上**。
+- 使用圖形介面需要 Tkinter；Windows 安裝 Python 時需包含 Tcl/Tk。
+- `pak.py`、`scr.py` 不需要額外 Python 套件。
+- `bmp_alp.py` 需要 Pillow **10.0.0 以上**。GUI 本身不依賴 Pillow，但執行圖像轉換時會使用它。
 
-以下命令使用 Windows Python Launcher。`py -3` 會呼叫系統已註冊的 Python 3；也可以改用 `python`，前提是 Python 已加入 PATH。
-
-安裝圖像工具依賴：
+安裝 Pillow：
 
 ```bat
 py -3 -m pip install -r requirements.txt
@@ -35,112 +45,129 @@ py -3 -m pip install -r requirements.txt
 py -3 GUI.py
 ```
 
-`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py` 請放在同一個資料夾。GUI 透過啟動 GUI 時使用的同一個 Python 執行子工具，並在下方顯示執行指令、處理訊息及錯誤。
+也可以直接執行各個命令列工具，不必啟動 GUI。若系統沒有 Python Launcher，可將 `py -3` 改成已加入 PATH 的 `python`。
+
+**檔案位置：** `GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py` 請放在同一個資料夾。GUI 會使用啟動 GUI 時的同一個 Python 解譯器呼叫子工具，在執行記錄中顯示完整命令與輸出；長行會自動折行，也可停止正在執行的工作。
+
+---
+
+## 建議工作流程
+
+1. 備份遊戲原始 PAK，不要直接在唯一一份原始資料上操作。
+2. 使用 PAK 功能解包至獨立資料夾。
+3. 使用腳本／JSON 功能掃描解包資料夾，匯出有效的 ADVSCRIPT2 腳本。
+4. 編輯 UTF-8 JSON，保留陣列項目數量與順序。
+5. 將 JSON 匯入原始解包資料夾，輸出至另一個資料夾。匯入時非 ADVSCRIPT2 資源會一併複製。
+6. 將匯入後的完整資料夾重包成 PAK。格式應依原始封包選擇 4A 或 4S。
+7. 將新封包放回遊戲測試；確認文字、選項、圖片、載入與流程均正常後，再決定是否替換原始資源。
 
 ---
 
 ## 1. PAK 封包：解包與重包
 
-`pak.py` 支援以下兩種 NekoSDK 封包：
+`pak.py` 支援兩種已辨識的 NekoSDK 封包格式：
 
-| 格式 | 結構 | 解包 | 重包 |
+| 格式 | 封包索引 | 解包 | 重包 |
 |---|---|---:|---:|
-| `NEKOPACK4A` | 索引區可包含多筆檔案紀錄 | 支援 | 支援 |
-| `NEKOPACK4S` | 單一檔案紀錄 | 支援 | 支援，來源資料夾必須恰好有一個檔案 |
+| `NEKOPACK4A` | 多筆檔案紀錄，可包含多個檔案 | 支援 | 支援 |
+| `NEKOPACK4S` | 單筆檔案紀錄 | 支援 | 支援，來源資料夾必須恰好有一個檔案 |
 
-兩種格式的索引配置不同，不能只替換檔頭就互相轉換。程式會依格式分別建立索引，並共用檔案資料的 Zlib 壓縮、大小資訊及 XOR 遮罩處理。
+兩種格式的索引配置不同，**不能只修改檔頭就把 4A 當成 4S，或反向轉換**。重包時會依所選格式重新建立索引及資料區。
+
+目前程式處理的封包資料包含 Zlib 壓縮資料、未壓縮大小資訊，以及資料開頭的 XOR 遮罩。封包內檔名使用 **CP932**；檔名無法以 CP932 編碼時，重包會報錯。
 
 ### 1.1 解包
 
-A、S 格式都使用相同的解包命令，程式會自動辨識封包檔頭：
+解包會自動辨識 PAK 檔頭中的 4A／4S 類型：
 
 ```bat
-py -3 pak.py -u "D:\Game\scr.pak" "D:\Game\scr_unpacked"
+py -3 pak.py -u "D:/Game/data.pak" "D:/Work/data_unpacked"
 ```
 
 ### 1.2 重包
 
-預設輸出 `NEKOPACK4A`，可以包含一個或多個檔案：
+預設輸出 `NEKOPACK4A`，可包含一個或多個檔案：
 
 ```bat
-py -3 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak"
+py -3 pak.py -p "D:/Work/data_unpacked" "D:/Game/data_new.pak"
 ```
 
-指定輸出 `NEKOPACK4A`：
+明確指定 4A：
 
 ```bat
-py -3 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak" --format 4A
+py -3 pak.py -p "D:/Work/data_unpacked" "D:/Game/data_new.pak" --format 4A
 ```
 
-指定輸出 `NEKOPACK4S`：
+指定 4S：
 
 ```bat
-py -3 pak.py -p "D:\Game\single_file_folder" "D:\Game\single_new.pak" --format 4S
+py -3 pak.py -p "D:/Work/single_file" "D:/Game/single_new.pak" --format 4S
 ```
 
-**4S 格式限制：** 來源資料夾內必須恰好有一個檔案（可位於子資料夾）。若有零個或多個檔案，程式會停止並回報數量，不會輸出不符合格式的封包。
+**4S 限制：** 來源資料夾及其子資料夾合計必須恰好有一個檔案。零個或多個檔案都會停止重包，不會產生不符合格式的封包。
 
-GUI 的「PAK 封包」頁籤也可在重包時選擇 `4A` 或 `4S`。解包時會自動辨識格式；選擇 `4S` 重包時，GUI 會先檢查來源檔案數量，`pak.py` 仍會再次執行檢查。
+建議依原始 PAK 的格式選擇輸出格式。即使工具能解析兩種格式，也不代表特定遊戲或資源載入器接受兩者互換。
 
-### 1.3 重包設定
+### 1.3 壓縮設定
 
-重包可透過環境變數調整：
+重包可透過環境變數調整 Zlib 壓縮等級及並行工作數：
 
-| 環境變數 | 說明 | 預設值 |
+| 環境變數 | 用途 | 預設值 |
 |---|---|---:|
 | `NEKO_PAK_LEVEL` | Zlib 壓縮等級，範圍 0–9 | `9` |
-| `NEKO_PAK_WORKERS` | 壓縮工作執行緒，需為正整數 | `1` |
+| `NEKO_PAK_WORKERS` | 壓縮工作執行緒數，必須是正整數 | `1` |
 
-例如：
+範例：
 
 ```bat
 set NEKO_PAK_LEVEL=6
 set NEKO_PAK_WORKERS=1
-py -3 pak.py -p "D:\Game\scr_imported" "D:\Game\scr_new.pak" --format 4A
+py -3 pak.py -p "D:/Work/data_unpacked" "D:/Game/data_new.pak" --format 4A
 ```
 
-舊電腦建議先維持單執行緒。輸出 PAK 必須放在來源資料夾之外。封包內檔名使用 CP932 編碼；若檔名無法使用 CP932 表示，重包會明確報錯。
+壓縮等級越高通常越偏向縮小封包，但需要更多 CPU 時間。增加工作執行緒可能提高多檔案重包速度，也會增加 CPU 與記憶體使用量。GUI 的工作執行緒選項限制為 1–16；命令列則接受任何正整數。
 
-> 重包成功代表封包結構及工具內部往返測試通過，不代表遊戲一定接受新封包。若遊戲原始素材使用 4S，建議優先以 4S 重包並在遊戲內測試；不要只因 A、S 都能被工具解析，就假定遊戲端可以互換。
+輸出 PAK 必須放在來源資料夾之外。程式會檢查不安全路徑、重複路徑、檔案／資料夾衝突及符號連結；解包會先將內容寫入暫存區，完成後才提交至輸出位置。若遇到損壞資料或路徑衝突，會停止並回報錯誤。
 
 ---
 
-## 2. 腳本／JSON：匯出、檢視與匯入
+## 2. ADVSCRIPT2 腳本與 JSON
 
-### 2.1 先確認 TXT 的實際格式
+### 2.1 TXT 副檔名不代表純文字
 
-`NEKOSDK_ADVSCRIPT2` 腳本雖然常使用 `.txt` 副檔名，內容實際上是二進位資料，檔案開頭具有：
+`NEKOSDK_ADVSCRIPT2` 腳本常使用 `.txt` 副檔名，但內容是二進位記錄資料，檔案開頭具有下列識別字串：
 
 ```text
 NEKOSDK_ADVSCRIPT2
 ```
 
-不要因為副檔名是 `.txt`，就直接用文字編輯器開啟後另存；這可能破壞二進位腳本。
+不要將這類檔案當成一般文字檔開啟後另存。即使檔名是 `.txt`，也必須先確認檔案簽章與內部結構。其他遊戲的純文字 TXT 不屬於 `scr.py` 的處理範圍。
 
-`scr.py` 只解析 `NEKOSDK_ADVSCRIPT2`，不是一般 TXT 閱讀器，也不會自動辨識其他遊戲的文字格式。若其他漢化 TXT 是一般純文字，應直接用文字編輯器檢視；若也是二進位格式，則需先確認其檔頭及資料結構，不能只靠副檔名判斷。
+### 2.2 匯出 JSON
 
-### 2.2 從腳本匯出 JSON
-
-單一檔案：
+單一腳本：
 
 ```bat
-py -3 scr.py -e "D:\Game\scr_unpacked\ep_300_000_000.txt" "D:\Game\ep_300_000_000.json" --encoding cp932
+py -3 scr.py -e "D:/Game/scripts/ep_000_001_000.txt" "D:/Work/ep_000_001_000.json" --encoding cp932 --dialogue-encoding auto
 ```
 
 整個資料夾：
 
 ```bat
-py -3 scr.py -e "D:\Game\scr_unpacked" "D:\Game\scr_json" --encoding cp932
+py -3 scr.py -e "D:/Game/scripts" "D:/Work/scripts_json" --encoding cp932 --dialogue-encoding auto
 ```
 
-匯出後的 JSON 使用 UTF-8，可用 Notepad++ 等文字編輯器檢視及編輯。資料夾模式會保留相對子資料夾結構，並將腳本副檔名改為 `.json`。
+資料夾模式會遞迴掃描子資料夾，保留相對路徑，並將有效 ADVSCRIPT2 腳本的副檔名改為 `.json`。沒有 ADVSCRIPT2 簽章的一般資源會略過，不會匯出成 JSON；若檔案具有 ADVSCRIPT2 簽章但內部結構損壞，則會回報錯誤，不會當成一般資源靜默跳過。
 
-目前會匯出的項目包括：
+匯出的 JSON 使用 **UTF-8**，可使用 Notepad++ 等文字編輯器修改。工具只匯出已辨識的對話及選項，不會把所有腳本指令、控制資料或其他欄位轉成完整純文字。
 
-- 對話：讀取說話者名稱及對話文字；沒有名稱時，JSON 項目只會有 `message`。
-- 可辨識選項：包含 `選択肢` 逐行格式，以及 `選択肢へ` 搭配引號、斜線分隔的選項列。
+目前辨識的文字類型包括：
 
-只會匯出程式能辨識的文字項目，不等於將整個腳本轉成可閱讀的純文字。其他指令、控制資料及未辨識欄位不會列入翻譯 JSON。
+- **對話記錄：** 讀取說話者名稱及對話文字。沒有說話者名稱時，JSON 項目不包含 `name`。
+- **場景選項：** 可解析 `選択肢` 後逐行排列的選項，以及 `選択肢へ` 後以括號／引號和斜線分隔的選項。
+- **獨立選項記錄：** 依可辨識的選項標記及文字欄位擷取選項。
+
+這是針對目前已分析的 ADVSCRIPT2 結構所做的解析，不代表所有遊戲腳本變體都能完整辨識。
 
 ### 2.3 JSON 項目格式
 
@@ -171,97 +198,137 @@ py -3 scr.py -e "D:\Game\scr_unpacked" "D:\Game\scr_json" --encoding cp932
 ]
 ```
 
-編輯時請注意：
+JSON 是依原始腳本記錄順序輸出的單一陣列。匯入時也是依相同順序逐項對應，並非依文字內容或自訂 ID 配對。編輯時請遵守：
 
-- 保留 JSON 陣列的項目順序，不要任意排序。
-- 不要任意增加或刪除項目；匯入時會依原始腳本的文字項目順序逐項對應。
-- 對話項目必須保留 `message` 字串；`name` 可依原項目有無而保留或修改。
-- 選項項目使用 `choice` 字串；單一選項不可含換行。
-- JSON 使用 UTF-8；這與腳本本身使用的 CP932 等字串編碼是兩回事。
+- **不要排序、增加或刪除陣列項目。** 匯入時會檢查項目是否不足、欄位型別是否正確，以及是否有未使用的多餘項目。
+- 對話項目必須有字串型別的 `message`；`name` 可省略，省略時保留原說話者名稱。
+- 選項項目必須有字串型別的 `choice`。
+- 說話者名稱不可包含換行；單一選項不可包含換行。
+- 保留 JSON 陣列與項目的結構，不要將對話項目改成選項項目，反之亦然。
 
-### 2.4 將修改後的 JSON 匯入腳本
+### 2.4 匯入 JSON
 
-單一檔案：
+單一腳本：
 
 ```bat
-py -3 scr.py -i "D:\Game\scr_unpacked\ep_300_000_000.txt" "D:\Game\ep_300_000_000.json" "D:\Game\ep_300_000_000_imported.txt" --encoding cp932
+py -3 scr.py -i "D:/Game/scripts/ep_000_001_000.txt" "D:/Work/ep_000_001_000.json" "D:/Work/imported/ep_000_001_000.txt" --encoding cp932 --dialogue-encoding auto
 ```
 
 整個資料夾：
 
 ```bat
-py -3 scr.py -i "D:\Game\scr_unpacked" "D:\Game\scr_json" "D:\Game\scr_imported" --encoding cp932
+py -3 scr.py -i "D:/Game/scripts" "D:/Work/scripts_json" "D:/Work/scripts_imported" --encoding cp932 --dialogue-encoding auto
 ```
 
-資料夾匯入時，原始腳本與 JSON 資料夾的相對路徑必須對應；每個 ADVSCRIPT2 腳本都必須有相對應的 JSON。非 ADVSCRIPT2 檔案不需要 JSON，會原樣複製到輸出資料夾，避免重包時遺漏其他資源。
+資料夾匯入時：
 
-`main` 欄位可能保存與執行時文字相同的內容，也可能是另一種語言的原文／參照內容。匯入時只有在能確認文字對應關係時才同步更新；無法確認時會保留原始 `main`，避免用翻譯文字覆蓋不同語言的參照資料。原始對話指令標頭及尾段也會盡可能保留。
+1. 原始腳本資料夾與 JSON 資料夾的相對路徑必須對應。
+2. 每個有效 ADVSCRIPT2 腳本都必須有相對應的 JSON。
+3. 非 ADVSCRIPT2 檔案不需要 JSON，會原樣複製到輸出資料夾，讓輸出資料夾可作為後續 PAK 重包的完整來源。
+4. 在輸出前會先驗證腳本、JSON 項目與編碼轉換；批次處理不會在尚有其他檔案未驗證時就先提交部分結果。
 
-### 2.5 腳本字串編碼
+匯入時會盡可能保留原始腳本記錄、指令標頭及對話尾段。部分文字也會出現在 `main` 欄位的顯示指令中；只有在能確認原始文字對應位置時才同步更新。若無法安全確認，就保留原本的 `main` 內容，避免覆蓋不相關資料。
 
-`scr.py` 預設使用 `cp932`。可用 `--encoding` 指定 Python 支援的編碼名稱，例如：
+### 2.5 腳本字串編碼：請注意 GUI 與 CLI 的預設差異
+
+腳本中的命令／場景欄位、對話／說話者欄位不一定使用相同編碼。JSON 本身固定使用 UTF-8；這與腳本二進位欄位內的字串編碼是不同層次。
+
+| 設定 | GUI 預設 | CLI 預設 |
+|---|---|---|
+| `--encoding`：指令／場景編碼 | `cp932` | `cp932` |
+| `--dialogue-encoding`：對話／說話者編碼 | `auto` | 未指定時沿用 `--encoding`，因此預設為 `cp932` |
+
+**重要：GUI 的對話編碼預設是 `auto`，但命令列不會自動套用這個設定。** 針對本分支所處理的 CP932 指令／場景、混合 CP932／GBK 對話素材，命令列請明確加上：
 
 ```bat
---encoding cp932
---encoding shift_jis
---encoding utf-8
---encoding gbk
---encoding big5
+--encoding cp932 --dialogue-encoding auto
 ```
 
-程式會先驗證編碼名稱是否有效，再讀取或處理腳本。這個參數指定的是腳本二進位欄位中原始字串的編碼，不是 JSON 編碼，也不是遊戲語言切換功能。
+目前 `auto` 模式的判定方式如下：
 
-CP932 無法表示的繁體中文字會在匯入時明確報錯，不會自動以問號取代。改成 UTF-8 也不代表遊戲引擎、字型或其他資源一定支援 UTF-8／繁體中文字；實際可用編碼仍須依遊戲而定。
+- 先以指令／場景編碼（此處為 CP932）讀取 opcode-5 對話記錄的 `main` 欄位。
+- 若 `main` 中 `[テキスト表示]` 後的文字內容，經換行正規化後可與對話欄位相符，該筆對話及說話者使用 CP932。
+- 其他 opcode-5 對話及說話者使用 GBK。
+- 獨立選項文字在 `auto` 模式下使用 GBK；場景選項仍依指令／場景編碼處理。
+
+這是依目前腳本欄位間的對應關係所做的**特定混合編碼判定**，不是適用於任意檔案的通用編碼偵測器。若素材不是這種混合格式，請改成明確的編碼設定。
+
+指定固定編碼的例子：
+
+```bat
+py -3 scr.py -e "D:/Game/scripts" "D:/Work/scripts_json" --encoding cp932 --dialogue-encoding cp932
+```
+
+程式會先驗證編碼名稱，並以嚴格模式解碼及編碼。若翻譯文字無法由指定編碼表示，會明確報錯，不會自動以問號取代。**改用 GBK、UTF-8 或其他編碼，不代表遊戲引擎會以該編碼讀取，也不代表遊戲字型具備所需字形。** 請先確認遊戲實際使用的編碼、引擎支援及字型資源，再決定匯入設定。
 
 ---
 
 ## 3. BMP／ALP 圖像轉換
 
-此功能處理 NekoSDK／Waffle 使用的 BMP+ALP 配對。BMP 儲存 RGB 圖像，ALP 儲存每像素 1 byte 的 Alpha 資料，合併後可輸出一般 RGBA 圖片。
+此功能處理 NekoSDK／Waffle 使用的 BMP+ALP 配對：BMP 儲存 RGB 圖像，ALP 儲存每像素 1 byte 的 Alpha 透明度資料。合併後可輸出一般 RGBA 圖片。
 
 ### 3.1 合併 BMP+ALP
 
 單組：
 
 ```bat
-py -3 bmp_alp.py -e "D:\Game\image.bmp" "D:\Game\image.alp" "D:\Game\image.png"
+py -3 bmp_alp.py -e "D:/Game/image.bmp" "D:/Game/image.alp" "D:/Work/image.png"
 ```
 
 批次：
 
 ```bat
-py -3 bmp_alp.py -e "D:\Game\bmp_alp" "D:\Game\png"
+py -3 bmp_alp.py -e "D:/Game/bmp_alp" "D:/Work/png"
 ```
 
-單張合併可依輸出副檔名選擇 PNG、TGA、BMP、JPEG、WebP 或 TIFF；批次合併固定輸出 PNG。JPEG 不支援 Alpha，輸出 JPEG 時會轉成 RGB 並捨棄透明度。
+單組合併可依輸出副檔名選擇 PNG、TGA、BMP、JPEG、WebP 或 TIFF；批次合併固定輸出 PNG。JPEG 不支援 Alpha，輸出 JPEG 時會轉為 RGB 並捨棄透明度。
 
-批次模式會依相對路徑尋找同名 BMP／ALP；缺少 ALP 的 BMP 會提示並跳過，不會拿其他檔案的 ALP 代替。個別配對發生轉換錯誤時會列出錯誤並回報非零結束代碼，即使其他圖片已成功轉換，也不會把部分失敗誤報為完全成功。
+批次模式會依相對路徑及不區分大小寫的檔名尋找同名 BMP／ALP：
+
+- 缺少對應 ALP 的 BMP 會提示並略過。
+- 不會拿其他檔案的 ALP 代替。
+- 若實際轉換發生錯誤，整批不會提交部分輸出。
+- 輸出資料夾必須位於來源資料夾之外。
+
+ALP 可讀取兩種資料排列：每列緊密排列（stride = 圖片寬度），或每列依 4 bytes 對齊。程式會依 ALP 檔案大小判斷；若兩者都不符合，會回報尺寸錯誤。
 
 ### 3.2 將一般圖片拆成 BMP+ALP
 
 單張：
 
 ```bat
-py -3 bmp_alp.py -c "D:\Game\image.png" "D:\Game\image.bmp" "D:\Game\image.alp"
+py -3 bmp_alp.py -c "D:/Game/image.png" "D:/Work/image.bmp" "D:/Work/image.alp"
 ```
 
 批次：
 
 ```bat
-py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
+py -3 bmp_alp.py -c "D:/Game/images" "D:/Work/bmp_alp"
 ```
 
-來源圖片支援 PNG、TGA、BMP、JPG／JPEG、WebP、TIF／TIFF。拆分時輸出 BMP 與 ALP；輸出 ALP 使用緊密排列的每像素 1 byte Alpha 資料。
+來源圖片支援 PNG、TGA、BMP、JPG／JPEG、WebP、TIF／TIFF。拆分時輸出：
 
-合併時可讀取緊密排列，以及每列以 4 bytes 對齊的 ALP 資料。批次拆分若發現不同格式的來源圖片會對應到相同輸出檔名，會停止並回報，避免覆蓋其中一張圖片。
+- BMP：RGB 圖像資料。
+- ALP：緊密排列的每像素 1 byte Alpha 資料，大小為「寬 × 高」bytes。
+
+批次拆分會保留來源子資料夾結構。若多張來源圖片會對應到相同的 BMP／ALP 輸出名稱（例如同名但不同副檔名），會在寫入前停止，避免覆蓋。輸出資料夾也必須位於來源資料夾之外。
 
 ---
 
-## 已驗證項目
+## 測試素材與驗證紀錄
 
-以下為目前程式搭配測試素材的工具層級驗證紀錄。位元組一致代表解包／重包或腳本匯入／匯出後資料符合比對條件，不代表已在遊戲內確認所有重包檔均能正常載入。
+儲存庫中的 `TEST/` 目前包含：
 
-| 測試素材 | 測試內容 | 結果 |
+- `ep_000_001_000116120116.pak`
+- `ep_000_001_000.txt`
+- `ep_000_004_000.txt`
+- `sys_v1.pak`
+
+其他大型測試封包及完整遊戲素材未全部放入儲存庫。
+
+以下是專案既有的**手動測試紀錄**，不是隨儲存庫附帶的自動化測試套件，也不是本次 README 編輯時重新執行的測試。位元組一致代表工具層級的往返比對符合預期，不代表已確認所有輸出都能在遊戲內正常載入。
+
+| 測試素材 | 測試內容 | 既有紀錄 |
 |---|---|---|
 | `scr.pak` | 解包 245 個腳本；未修改匯出／匯入後逐位元組比較 | 245／245 相同 |
 | `scr.pak` | 34,043 筆對話及 2 筆選項加入測試文字，匯入後再次匯出 JSON | 245／245 份 JSON 完全一致 |
@@ -272,4 +339,12 @@ py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 | `NEKOPACK4A` 測試封包 | 兩個檔案重包、再次解包後逐位元組比較 | 完全一致 |
 | BMP／ALP 範例 | 合併有對應 ALP 的 BMP；處理缺少 ALP 的 BMP | 5 組合併成功；2 個缺少 ALP 的 BMP 提示並跳過 |
 
-測試素材未全部包含在此儲存庫中。實際使用前仍請保留原始 PAK／腳本備份，並在遊戲內測試修改後資源。
+---
+
+## 限制與注意事項
+
+1. **格式範圍有限：** PAK 僅支援已辨識的 NEKOPACK4A／4S；腳本僅支援具有正確簽章及可解析結構的 NEKOSDK_ADVSCRIPT2；圖像功能僅處理 BMP／ALP 配對及列出的常見圖片格式。
+2. **不要覆寫唯一原始檔：** PAK、腳本及批次圖像操作都應使用獨立輸出位置。程式會做部分路徑衝突檢查，但仍應自行保留備份。
+3. **文字能編碼不等於遊戲能顯示：** 腳本匯入成功只代表文字可依指定編碼寫入資料；遊戲引擎、字型、字形表及文字繪製流程仍可能不支援該文字。
+4. **工具成功不等於遊戲相容：** 封包能再次解包、腳本能再次匯出，屬於工具層級的往返驗證；最終仍須在目標遊戲中測試。
+5. **批次輸出要保留完整資料：** 匯出時只為有效 ADVSCRIPT2 建立 JSON；匯入時則會把非腳本檔案複製到輸出資料夾。請使用原始解包資料夾作為匯入來源，不要只拿 JSON 資料夾重包。
