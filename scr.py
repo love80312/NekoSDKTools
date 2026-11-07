@@ -3,20 +3,18 @@
 
 The input files are binary ADVSCRIPT2 streams even though their file names
 usually end in .txt. This tool exports translatable dialogue/choice strings
-as UTF-8 JSON and can import the edited JSON back into the original script.
+as UTF-8 JSON and imports edited JSON back into the original script.
 
-Default command/scene encoding is CP932 (Shift-JIS compatible). Dialogue text
-can use a different encoding; --dialogue-encoding defaults to --encoding for
-backward compatibility. For scripts with Japanese commands and GBK dialogue,
-use --encoding cp932 --dialogue-encoding gbk.
+Default command/scene encoding is CP932. --dialogue-encoding defaults to
+--encoding for backward compatibility. For the mixed CP932/GBK files where
+Japanese scene-navigation strings are mirrored in the CP932
+[テキスト表示] main field, use:
+    --encoding cp932 --dialogue-encoding auto
 
-Changing the byte encoding does not make the game engine support it.
-
-Usage:
-  py -3.13 scr.py -e extracted_folder json_folder
-  py -3.13 scr.py -i extracted_folder json_folder imported_folder
-  py -3.13 scr.py -e input.txt output.json --encoding cp932 --dialogue-encoding gbk
-  py -3.13 scr.py -i input.txt input.json output.txt --encoding cp932 --dialogue-encoding gbk
+In auto mode, a byte-for-byte match against the CP932 command body identifies
+a CP932 text record. Other opcode-5 dialogue records use GBK. This avoids
+guessing from whether a byte sequence happens to decode in both codecs.
+Changing byte encoding does not make the game engine support that encoding.
 """
 
 from __future__ import annotations
@@ -67,12 +65,7 @@ class ChoiceSpan:
 
 
 def validate_encoding(encoding: str) -> str:
-    """Resolve an encoding name before any script files are processed.
-
-    utf-8-sig is normalized to UTF-8. A script stores independent strings,
-    not one BOM-prefixed text stream; writing utf-8-sig to every field would
-    insert a BOM at the start of each individual string.
-    """
+    """Resolve and validate a Python codec name."""
     name = encoding.strip()
     if not name:
         raise ScriptError("encoding name cannot be empty")
@@ -80,7 +73,15 @@ def validate_encoding(encoding: str) -> str:
         resolved = codecs.lookup(name).name
     except LookupError as exc:
         raise ScriptError(f"unknown text encoding: {encoding!r}") from exc
+    # A script contains independent strings, not one BOM-prefixed stream.
     return "utf-8" if resolved == "utf-8-sig" else resolved
+
+
+def validate_dialogue_encoding(encoding: str) -> str:
+    """Validate a dialogue codec or the special mixed-encoding mode."""
+    if encoding.strip().casefold() == "auto":
+        return "auto"
+    return validate_encoding(encoding)
 
 
 def read_u32(data: bytes, offset: int, context: str) -> int:
@@ -112,12 +113,10 @@ def decode_field(raw: bytes, encoding: str, context: str) -> str:
 def decode_candidates(
     raw: bytes, encodings: tuple[str, ...], context: str
 ) -> list[tuple[str, str]]:
-    """Return every successful decoding, keeping the encoding identity.
+    """Return successful decodings with their codec identities.
 
-    This is used only to recognize command markers. A successful decode alone
-    does not prove that the selected encoding is correct (CP932 and GBK can
-    both decode the same byte sequence). Actual translatable argument strings
-    use the explicitly configured dialogue encoding.
+    Successful decoding by itself does not prove that a codec is correct:
+    CP932 and GBK can both decode many of the same byte sequences.
     """
     results: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -149,11 +148,67 @@ def encode_field(text: str, encoding: str, keep_nul: bool) -> bytes:
     return raw
 
 
+def _without_terminal_nul(raw: bytes) -> bytes:
+    return raw[:-1] if raw.endswith(b"\0") else raw
+
+
+def _normalize_raw_line_breaks(raw: bytes) -> bytes:
+    """Normalize byte-level CR/LF while preserving all non-linebreak bytes."""
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n").rstrip(b"\n")
+
+
+def resolve_text_record_encoding(
+    record: Record, command_encoding: str, dialogue_encoding: str, context: str
+) -> str:
+    """Resolve one opcode-5 record's codec in mixed CP932/GBK mode.
+
+    The Japanese navigation records in the examined script duplicate their
+    displayed text in the CP932 [テキスト表示] main field and args[1].
+    Matching the raw bytes in that known command body is stronger evidence
+    than trying to decode the same bytes under both codecs.
+    """
+    if dialogue_encoding != "auto":
+        return dialogue_encoding
+
+    if len(record.args) != 32:
+        raise ScriptError(f"{context}: expected exactly 32 argument fields")
+
+    raw_message = _without_terminal_nul(record.args[1])
+    raw_main = _without_terminal_nul(record.main)
+
+    try:
+        main_text = decode_field(record.main, command_encoding, f"{context} main")
+    except ScriptError:
+        return "gbk"
+
+    header, separator, _body = main_text.partition("\n")
+    if not separator or not header.startswith("[テキスト表示]"):
+        return "gbk"
+
+    # Use the raw byte body, not text re-encoded from a decoded string.
+    # This is important because successful CP932/GBK decoding can be ambiguous.
+    raw_separator = raw_main.find(b"\n")
+    if raw_separator < 0:
+        return "gbk"
+    raw_body = raw_main[raw_separator + 1:]
+
+    message_normalized = _normalize_raw_line_breaks(raw_message)
+    body_normalized = _normalize_raw_line_breaks(raw_body)
+    if message_normalized and body_normalized.startswith(message_normalized):
+        return command_encoding
+    return "gbk"
+
+
+def dialogue_choice_encoding(dialogue_encoding: str) -> str:
+    """Use GBK for standalone choice payloads when auto mode is selected."""
+    return "gbk" if dialogue_encoding == "auto" else dialogue_encoding
+
+
 def read_script(path: Path) -> Script:
     data = path.read_bytes()
-
     if not data.startswith(MAGIC):
         raise ScriptError(f"invalid ADVSCRIPT2 signature: {path}")
+
     pos = len(MAGIC)
     count = read_u32(data, pos, "record count")
     pos += 4
@@ -186,7 +241,7 @@ def read_script(path: Path) -> Script:
             pos += 4
             if main_len > len(data) - pos:
                 raise ScriptError(f"main string exceeds end of file in record #{index}: {path}")
-            main = data[pos : pos + main_len]
+            main = data[pos:pos + main_len]
             pos += main_len
 
             args: list[bytes] = []
@@ -198,7 +253,7 @@ def read_script(path: Path) -> Script:
                         f"argument string exceeds end of file in record #{index}, "
                         f"arg #{arg_index}: {path}"
                     )
-                args.append(data[pos : pos + arg_len])
+                args.append(data[pos:pos + arg_len])
                 pos += arg_len
         except struct.error as exc:
             raise ScriptError(f"invalid record #{index} at 0x{start:X} in {path}") from exc
@@ -242,25 +297,26 @@ def write_script(script: Script, path: Path) -> None:
 
 def decode_record_text(record: Record, encoding: str, context: str) -> tuple[str, list[str]]:
     main = decode_field(record.main, encoding, f"{context} main")
-    args = [decode_field(value, encoding, f"{context} arg {index}") for index, value in enumerate(record.args)]
+    args = [
+        decode_field(value, encoding, f"{context} arg {index}")
+        for index, value in enumerate(record.args)
+    ]
     return main, args
 
 
 def is_text_record(record: Record) -> bool:
-    return record.header[3] == TEXT_OPCODE and len(record.args) == 32 and has_content(record.args[1])
+    return (
+        record.header[3] == TEXT_OPCODE
+        and len(record.args) == 32
+        and has_content(record.args[1])
+    )
 
 
 def is_scene_record(record: Record) -> bool:
-    return record.header[3] == SCENE_OPCODE and (has_content(record.main) or has_content(record.args[31]))
-
-
-def scene_source(record: Record, encoding: str) -> tuple[str, str] | None:
-    """Return (field_name, decoded text), preferring argument 31 when present."""
-    if has_content(record.args[31]):
-        return "arg31", decode_field(record.args[31], encoding, "scene arg 31")
-    if has_content(record.main):
-        return "main", decode_field(record.main, encoding, "scene main")
-    return None
+    return (
+        record.header[3] == SCENE_OPCODE
+        and (has_content(record.main) or has_content(record.args[31]))
+    )
 
 
 def split_line_ending(line: str) -> tuple[str, str]:
@@ -345,7 +401,6 @@ def parse_scene_choice_spans(text: str) -> list[ChoiceSpan] | None:
         else:
             parsed = parse_quoted_choice_row(body, offset)
             if parsed is not None:
-                # A quoted row is a single option declaration; do not absorb later commands.
                 return parsed
         offset += len(line)
 
@@ -353,11 +408,7 @@ def parse_scene_choice_spans(text: str) -> list[ChoiceSpan] | None:
 
 
 def scene_choices(record: Record, encoding: str) -> tuple[str, str, list[ChoiceSpan]] | None:
-    """Locate a real choice block in arg[31] or main.
-
-    A nonempty arg[31] is not necessarily a decodable scene command. Try the
-    main field if arg[31] cannot be decoded or does not contain a choice block.
-    """
+    """Locate a real choice block in arg[31] or main."""
     if not is_scene_record(record):
         return None
 
@@ -400,20 +451,19 @@ def replace_scene_choice_text(
 def choice_marker_arg_indices(
     record: Record, encoding: str, dialogue_encoding: str
 ) -> set[int]:
-    """Return argument slots that contain command/choice markers.
-
-    Check both configured encodings for marker recognition. This avoids
-    treating a GBK string as CP932 merely because CP932 can decode the bytes.
-    Marker-bearing slots are command metadata, not translatable choice text.
-    """
+    """Return argument slots that contain command/choice markers."""
     marker_indices: set[int] = set()
+    choice_encoding = dialogue_choice_encoding(dialogue_encoding)
     for index, raw in enumerate(record.args):
         if index in (30, 31) or not has_content(raw):
             continue
         candidates = decode_candidates(
-            raw, (encoding, dialogue_encoding), f"choice arg {index}"
+            raw, (encoding, choice_encoding), f"choice arg {index}"
         )
-        if any(any(marker in value for marker in CHOICE_MARKERS) for value, _enc in candidates):
+        if any(
+            any(marker in value for marker in CHOICE_MARKERS)
+            for value, _enc in candidates
+        ):
             marker_indices.add(index)
     return marker_indices
 
@@ -422,27 +472,26 @@ def is_choice_record(record: Record, encoding: str, dialogue_encoding: str) -> b
     if record.header[3] in (TEXT_OPCODE, SCENE_OPCODE):
         return False
 
-    main_candidates = decode_candidates(record.main, (encoding, dialogue_encoding), "choice main")
+    choice_encoding = dialogue_choice_encoding(dialogue_encoding)
+    main_candidates = decode_candidates(
+        record.main, (encoding, choice_encoding), "choice main"
+    )
     if any(
         value.startswith(("選択肢\r", "選択肢\n"))
         for value, _enc in main_candidates
     ):
         return True
-
     return bool(choice_marker_arg_indices(record, encoding, dialogue_encoding))
 
 
 def extract_choice_targets(
     record: Record, encoding: str, dialogue_encoding: str
 ) -> list[tuple[str, int, str, str, str]]:
-    """Find editable choice values without exporting marker/metadata fields.
-
-    A standalone main-field choice command is handled as one value. For the
-    argument-based form, marker-bearing argument slots are command metadata;
-    the other nonempty candidate slots are treated as choice strings and are
-    decoded with the explicitly selected dialogue encoding.
-    """
-    main_candidates = decode_candidates(record.main, (encoding, dialogue_encoding), "choice main")
+    """Find editable choice values without exporting marker/metadata fields."""
+    choice_encoding = dialogue_choice_encoding(dialogue_encoding)
+    main_candidates = decode_candidates(
+        record.main, (encoding, choice_encoding), "choice main"
+    )
     for main, main_encoding in main_candidates:
         if main.startswith("選択肢\r\n"):
             return [("main", -1, main[5:], "選択肢\r\n", main_encoding)]
@@ -460,12 +509,12 @@ def extract_choice_targets(
         if index in (30, 31) or index in marker_indices or not has_content(raw):
             continue
         try:
-            value = decode_field(raw, dialogue_encoding, f"choice arg {index}")
+            value = decode_field(raw, choice_encoding, f"choice arg {index}")
         except ScriptError:
             # Non-text or unrelated command slots are not translatable values.
             continue
         if value:
-            results.append(("arg", index, value, "", dialogue_encoding))
+            results.append(("arg", index, value, "", choice_encoding))
     return results
 
 
@@ -523,23 +572,15 @@ def make_text_main(
 ) -> str | None:
     """Update dialogue text while preserving the original command header and tail."""
     header, separator, old_body = old_main.partition("\n")
-    if not header.startswith("[テキスト表示]"):
-        return None
-    if not separator:
-        # Some localized scripts keep the original-language command in main
-        # while storing the translated runtime string in args[1]. In that
-        # layout main is reference/source text, not a synchronized copy.
+    if not header.startswith("[テキスト表示]") or not separator:
         return None
 
     normalized_body, body_offsets = normalize_line_breaks_with_offsets(old_body)
-    normalized_message, _message_offsets = normalize_line_breaks_with_offsets(old_message)
+    normalized_message, _ = normalize_line_breaks_with_offsets(old_message)
     if not normalized_body.startswith(normalized_message):
-        # Do not fail the import and, more importantly, do not overwrite a
-        # different-language/reference command with translated args[1].
+        # The main field can be source/reference text rather than a synchronized copy.
         return None
 
-    # Preserve the complete original header, including non-path voice IDs and spacing.
-    # Only replace the exact speaker substring when it can be located safely.
     first = header
     if name != old_name:
         command = "[テキスト表示]"
@@ -547,14 +588,11 @@ def make_text_main(
         if old_name:
             speaker_pos = header.find(old_name, len(command))
             if speaker_pos < 0:
-                # A localized speaker name may differ from the source-language
-                # name stored in main. Leave the reference command unchanged.
                 return None
             first = header[:speaker_pos] + name + header[speaker_pos + len(old_name):]
         else:
             first = command + " " + name + header_rest
 
-    # Preserve the original number of trailing CR/LF units in the command.
     trailing_start, trailing_count = trailing_line_break_units(old_message)
     if trailing_count:
         content_prefix, _ = normalize_line_breaks_with_offsets(old_message[:trailing_start])
@@ -570,7 +608,6 @@ def make_text_main(
         raw_end = body_offsets[len(normalized_message) - 1] if normalized_message else 0
     tail = old_body[raw_end:]
 
-    # The source command uses LF even when the argument message contains CRLF.
     display_message = message.replace("\r\n", "\n").replace("\r", "\n")
     return f"{first}\n{display_message}{tail}"
 
@@ -582,15 +619,17 @@ def export_items(
     for record_index, record in enumerate(script.records):
         context = f"{source_name} record {record_index}"
         if is_text_record(record):
-            name = decode_field(record.args[0], dialogue_encoding, f"{context} speaker")
-            message = decode_field(record.args[1], dialogue_encoding, f"{context} message")
+            record_encoding = resolve_text_record_encoding(
+                record, encoding, dialogue_encoding, context
+            )
+            name = decode_field(record.args[0], record_encoding, f"{context} speaker")
+            message = decode_field(record.args[1], record_encoding, f"{context} message")
             if name:
                 items.append({"name": name, "message": message})
             else:
                 items.append({"message": message})
             continue
 
-        # Scene/choice commands are control strings and retain --encoding.
         parsed_scene = scene_choices(record, encoding)
         if parsed_scene is not None:
             for choice in parsed_scene[2]:
@@ -601,7 +640,6 @@ def export_items(
             targets = extract_choice_targets(record, encoding, dialogue_encoding)
             for _target, _arg_index, choice, _prefix, _field_encoding in targets:
                 items.append({"choice": choice})
-
     return items
 
 
@@ -621,8 +659,11 @@ def take_item(
 
 
 def import_items(
-    script: Script, items: list[dict[str, object]], encoding: str,
-    dialogue_encoding: str, source_name: str
+    script: Script,
+    items: list[dict[str, object]],
+    encoding: str,
+    dialogue_encoding: str,
+    source_name: str,
 ) -> int:
     item_index = 0
     changed_records = 0
@@ -633,8 +674,11 @@ def import_items(
 
         if is_text_record(record):
             item = take_item(items, item_index, "message", source_name)
-            old_name = decode_field(record.args[0], dialogue_encoding, f"{context} speaker")
-            old_message = decode_field(record.args[1], dialogue_encoding, f"{context} message")
+            record_encoding = resolve_text_record_encoding(
+                record, encoding, dialogue_encoding, context
+            )
+            old_name = decode_field(record.args[0], record_encoding, f"{context} speaker")
+            old_message = decode_field(record.args[1], record_encoding, f"{context} message")
             name = item.get("name", old_name)
             message = item["message"]
             if not isinstance(name, str) or not isinstance(message, str):
@@ -643,22 +687,25 @@ def import_items(
                 raise ScriptError("speaker names cannot contain line breaks")
 
             if name != old_name:
-                record.args[0] = encode_field(name, dialogue_encoding, record.args[0].endswith(b"\0"))
+                record.args[0] = encode_field(
+                    name, record_encoding, record.args[0].endswith(b"\0")
+                )
                 record_changed = True
             if message != old_message:
-                record.args[1] = encode_field(message, dialogue_encoding, record.args[1].endswith(b"\0"))
+                record.args[1] = encode_field(
+                    message, record_encoding, record.args[1].endswith(b"\0")
+                )
                 record_changed = True
 
             if record_changed:
+                main_text = decode_field(record.main, encoding, f"{context} main")
                 new_main = make_text_main(
-                    name,
-                    old_name,
-                    message,
-                    old_message,
-                    decode_field(record.main, encoding, f"{context} main"),
+                    name, old_name, message, old_message, main_text
                 )
                 if new_main is not None:
-                    record.main = encode_field(new_main, encoding, record.main.endswith(b"\0"))
+                    record.main = encode_field(
+                        new_main, encoding, record.main.endswith(b"\0")
+                    )
             item_index += 1
 
         else:
@@ -675,31 +722,38 @@ def import_items(
                 if updated != old_text:
                     if field_name == "arg31":
                         raw = record.args[31]
-                        record.args[31] = encode_field(updated, encoding, raw.endswith(b"\0"))
-                        # Some script records mirror the same scene command in main.
+                        record.args[31] = encode_field(
+                            updated, encoding, raw.endswith(b"\0")
+                        )
                         try:
                             main_text = decode_field(record.main, encoding, f"{context} main")
                         except ScriptError:
                             main_text = ""
                         main_choices = parse_scene_choice_spans(main_text)
                         if main_choices is not None and len(main_choices) == len(new_choices):
-                            main_updated = replace_scene_choice_text(main_text, new_choices, main_choices)
+                            main_updated = replace_scene_choice_text(
+                                main_text, new_choices, main_choices
+                            )
                             if main_updated != main_text:
                                 record.main = encode_field(
                                     main_updated, encoding, record.main.endswith(b"\0")
                                 )
                     else:
                         raw = record.main
-                        record.main = encode_field(updated, encoding, raw.endswith(b"\0"))
-                        # Keep arg31 synchronized only when it is decodable and
-                        # independently recognized as a matching scene-choice block.
+                        record.main = encode_field(
+                            updated, encoding, raw.endswith(b"\0")
+                        )
                         try:
-                            arg_text = decode_field(record.args[31], encoding, f"{context} arg 31")
+                            arg_text = decode_field(
+                                record.args[31], encoding, f"{context} arg 31"
+                            )
                         except ScriptError:
                             arg_text = ""
                         arg_choices = parse_scene_choice_spans(arg_text)
                         if arg_choices is not None and len(arg_choices) == len(new_choices):
-                            arg_updated = replace_scene_choice_text(arg_text, new_choices, arg_choices)
+                            arg_updated = replace_scene_choice_text(
+                                arg_text, new_choices, arg_choices
+                            )
                             if arg_updated != arg_text:
                                 record.args[31] = encode_field(
                                     arg_updated, encoding, record.args[31].endswith(b"\0")
@@ -718,7 +772,9 @@ def import_items(
                     if new_choice != old_choice:
                         if target == "main":
                             replacement = prefix + new_choice
-                            record.main = encode_field(replacement, target_encoding, record.main.endswith(b"\0"))
+                            record.main = encode_field(
+                                replacement, target_encoding, record.main.endswith(b"\0")
+                            )
                         else:
                             raw = record.args[arg_index]
                             record.args[arg_index] = encode_field(
@@ -788,8 +844,11 @@ def load_translation(path: Path) -> list[dict[str, object]]:
 
 
 def import_file(
-    original_path: Path, json_path: Path, output_path: Path,
-    encoding: str, dialogue_encoding: str
+    original_path: Path,
+    json_path: Path,
+    output_path: Path,
+    encoding: str,
+    dialogue_encoding: str,
 ) -> None:
     if path_key(original_path) == path_key(output_path):
         raise ScriptError("imported script output cannot overwrite the original script")
@@ -818,8 +877,6 @@ def export_path(
         if not files:
             raise ScriptError(f"no files found: {input_path}")
 
-        # Preflight output names. For example, scene.txt and scene.bin would
-        # both otherwise map to scene.json and one export would overwrite the other.
         targets: dict[str, Path] = {}
         for file_path in files:
             relative = file_path.relative_to(input_path)
@@ -839,8 +896,10 @@ def export_path(
             relative = file_path.relative_to(input_path)
             try:
                 export_file(
-                    file_path, (output_path / relative).with_suffix(".json"),
-                    encoding, dialogue_encoding
+                    file_path,
+                    (output_path / relative).with_suffix(".json"),
+                    encoding,
+                    dialogue_encoding,
                 )
                 processed += 1
             except ScriptError as exc:
@@ -855,8 +914,11 @@ def export_path(
 
 
 def import_path(
-    original_path: Path, json_path: Path, output_path: Path,
-    encoding: str, dialogue_encoding: str
+    original_path: Path,
+    json_path: Path,
+    output_path: Path,
+    encoding: str,
+    dialogue_encoding: str,
 ) -> None:
     if original_path.is_dir():
         if not json_path.is_dir():
@@ -864,10 +926,7 @@ def import_path(
         ensure_output_not_inside(output_path, original_path, "import output folder")
         if is_path_within(json_path, original_path):
             raise ScriptError("translation JSON folder must be outside the original script folder")
-        if (
-            is_path_within(output_path, json_path)
-            or is_path_within(json_path, output_path)
-        ):
+        if is_path_within(output_path, json_path) or is_path_within(json_path, output_path):
             raise ScriptError("import output folder and translation JSON folder must be separate")
 
         files = iter_files(original_path)
@@ -886,7 +945,6 @@ def import_path(
                     continue
                 raise
 
-        # Validate all required JSON files before writing any output files.
         missing_json = [
             (json_path / file_path.relative_to(original_path)).with_suffix(".json")
             for file_path in scripts
@@ -925,21 +983,30 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("-e", "--export", action="store_true", help="export script text to JSON")
     mode.add_argument("-i", "--import-json", action="store_true", help="import edited JSON into scripts")
-    parser.add_argument("paths", nargs="+", help="export: input output; import: original JSON_folder output")
     parser.add_argument(
-        "--encoding", default=DEFAULT_ENCODING,
+        "paths",
+        nargs="+",
+        help="export: input output; import: original JSON_folder output",
+    )
+    parser.add_argument(
+        "--encoding",
+        default=DEFAULT_ENCODING,
         help=f"command/scene encoding (default: {DEFAULT_ENCODING})",
     )
     parser.add_argument(
-        "--dialogue-encoding", default=None,
-        help="dialogue speaker/message/choice encoding (default: same as --encoding)",
+        "--dialogue-encoding",
+        default=None,
+        help=(
+            "dialogue encoding; use 'auto' for mixed CP932/GBK opcode-5 text "
+            "(default: same as --encoding)"
+        ),
     )
     args = parser.parse_args(argv)
 
     try:
         encoding = validate_encoding(args.encoding)
         dialogue_encoding = (
-            validate_encoding(args.dialogue_encoding)
+            validate_dialogue_encoding(args.dialogue_encoding)
             if args.dialogue_encoding is not None
             else encoding
         )
@@ -951,8 +1018,11 @@ def main(argv: list[str] | None = None) -> int:
             if len(args.paths) != 3:
                 parser.error("import requires exactly: original_path json_path output_path")
             import_path(
-                Path(args.paths[0]), Path(args.paths[1]), Path(args.paths[2]),
-                encoding, dialogue_encoding,
+                Path(args.paths[0]),
+                Path(args.paths[1]),
+                Path(args.paths[2]),
+                encoding,
+                dialogue_encoding,
             )
     except (OSError, UnicodeError, ScriptError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
