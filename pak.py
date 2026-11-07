@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""NekoSDK NEKOPACK4A extractor and repacker.
+"""NekoSDK NEKOPACK4A / NEKOPACK4S extractor and NEKOPACK4A repacker.
 
-Supports the NEKOPACK4A container used by the tested NekoSDK game files.
+Supported archive formats:
+- NEKOPACK4A: indexed archive; supports extraction and repacking.
+- NEKOPACK4S: single-entry archive; extraction only.
+
 File names are stored as CP932. Each payload is a zlib stream followed by
 an uncompressed-size footer; the first 0x20 bytes of the stored payload are
 XOR-masked.
 
 Usage:
-  py -3.13 pak.py -u input.pak output_folder
-  py -3.13 pak.py -p input_folder output.pak
+  py -3.14 pak.py -u input.pak output_folder
+  py -3.14 pak.py -p input_folder output.pak
 
 Optional environment variables for packing:
   NEKO_PAK_LEVEL=0..9       zlib compression level (default: 9)
@@ -28,7 +31,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterable
 
-MAGIC = b"NEKOPACK4A"
+SIGNATURE = b"NEKOPACK"
+MAGIC = SIGNATURE + b"4A"
+MAGIC_SINGLE = SIGNATURE + b"4S"
 HEADER_SIZE = 14
 CHUNK_SIZE = 1024 * 1024
 UINT32_MAX = 0xFFFFFFFF
@@ -111,27 +116,76 @@ def normalized_entry_name(name: str) -> str:
     return name.replace("\\", "/")
 
 
-def parse_entries(archive_path: Path, encoding: str = DEFAULT_ENCODING) -> list[Entry]:
+def read_archive_index(archive_path: Path) -> tuple[bytes, int, str]:
+    """Read the index area for either NEKOPACK4A or NEKOPACK4S.
+
+    NEKOPACK4A stores the total index size immediately after the 10-byte
+    signature/type field. NEKOPACK4S instead stores a single filename length,
+    followed by that filename and one obfuscated offset/length pair.
+    Both index layouts can then be parsed by the same entry parser.
+    """
     archive_size = archive_path.stat().st_size
     if archive_size < HEADER_SIZE:
-        raise PakError("file is too small to be a NEKOPACK4A archive")
+        raise PakError("file is too small to be a NekoSDK archive")
 
     with archive_path.open("rb") as archive:
         header = archive.read(HEADER_SIZE)
-        if len(header) != HEADER_SIZE or header[:10] != MAGIC:
-            raise PakError("invalid NekoSDK archive header (expected NEKOPACK4A)")
+        if len(header) != HEADER_SIZE or header[:8] != SIGNATURE:
+            raise PakError("invalid NekoSDK archive signature (expected NEKOPACK)")
 
-        index_size = read_u32(header, 10)
-        if index_size > archive_size - HEADER_SIZE:
-            raise PakError("index extends beyond end of archive")
-        index = archive.read(index_size)
-        if len(index) != index_size:
-            raise PakError("truncated archive index")
+        archive_type = header[8:10]
+        if archive_type == b"4A":
+            index_size = read_u32(header, 10)
+            if index_size > archive_size - HEADER_SIZE:
+                raise PakError("index extends beyond end of archive")
+            index = archive.read(index_size)
+            if len(index) != index_size:
+                raise PakError("truncated archive index")
+            return index, HEADER_SIZE + index_size, "4A"
+
+        if archive_type == b"4S":
+            # In 4S, the uint32 at offset 10 is the filename length, not the
+            # total index size. There is exactly one entry and no terminator.
+            # The 14-byte header read above already includes this length at
+            # offsets 10..13.
+            name_size_raw = header[10:14]
+            name_size = read_u32(name_size_raw, 0)
+            if name_size == 0:
+                raise PakError("NEKOPACK4S contains an empty filename")
+            if name_size > 0x100:
+                raise PakError(f"entry name is too long: {name_size} bytes")
+
+            remaining_index_size = name_size + 8
+            if remaining_index_size > archive_size - HEADER_SIZE:
+                raise PakError("NEKOPACK4S index extends beyond end of archive")
+            index_tail = archive.read(remaining_index_size)
+            if len(index_tail) != remaining_index_size:
+                raise PakError("truncated NEKOPACK4S index")
+
+            index = name_size_raw + index_tail
+            return index, HEADER_SIZE + remaining_index_size, "4S"
+
+        try:
+            type_name = archive_type.decode("ascii", errors="replace")
+        except Exception:
+            type_name = repr(archive_type)
+        raise PakError(
+            f"unsupported NekoSDK archive type: {type_name!r} "
+            "(expected 4A or 4S)"
+        )
+
+
+def parse_entries(archive_path: Path, encoding: str = DEFAULT_ENCODING) -> list[Entry]:
+    if not archive_path.is_file():
+        raise PakError(f"input archive not found: {archive_path}")
+
+    index, data_start, archive_type = read_archive_index(archive_path)
+    index_size = len(index)
+    archive_size = archive_path.stat().st_size
 
     entries: list[Entry] = []
     seen_names: set[str] = set()
     pos = 0
-    data_start = HEADER_SIZE + index_size
 
     while pos < index_size:
         if pos + 4 > index_size:
@@ -139,6 +193,8 @@ def parse_entries(archive_path: Path, encoding: str = DEFAULT_ENCODING) -> list[
         name_size = read_u32(index, pos)
         pos += 4
         if name_size == 0:
+            if archive_type == "4S":
+                raise PakError("NEKOPACK4S contains an invalid empty entry")
             break
         if name_size > 0x100:
             raise PakError(f"entry name is too long: {name_size} bytes")
@@ -166,6 +222,16 @@ def parse_entries(archive_path: Path, encoding: str = DEFAULT_ENCODING) -> list[
             raise PakError(f"entry points outside archive: {name}")
 
         entries.append(Entry(name, name_bytes, offset, stored_size))
+
+    if archive_type == "4S":
+        if pos != index_size:
+            raise PakError("unexpected trailing data in NEKOPACK4S index")
+        if len(entries) != 1:
+            raise PakError("NEKOPACK4S must contain exactly one entry")
+    elif pos < index_size:
+        # A-format archives may end their index with a zero-length terminator.
+        # Preserve the existing behavior of accepting that terminator.
+        pass
 
     if not entries:
         raise PakError("archive index is empty")
@@ -531,6 +597,9 @@ def usage() -> str:
         "Usage:\n"
         "  pak.py -u input.pak output_folder\n"
         "  pak.py -p input_folder output.pak\n"
+        "\n"
+        "Extraction supports NEKOPACK4A and NEKOPACK4S.\n"
+        "Packing outputs NEKOPACK4A.\n"
         "\n"
         "Packing options:\n"
         "  NEKO_PAK_LEVEL=0..9       compression level (default 9)\n"
