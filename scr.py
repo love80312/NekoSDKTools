@@ -73,7 +73,6 @@ def validate_encoding(encoding: str) -> str:
         resolved = codecs.lookup(name).name
     except LookupError as exc:
         raise ScriptError(f"unknown text encoding: {encoding!r}") from exc
-    # A script contains independent strings, not one BOM-prefixed stream.
     return "utf-8" if resolved == "utf-8-sig" else resolved
 
 
@@ -164,8 +163,8 @@ def resolve_text_record_encoding(
 
     The Japanese navigation records in the examined script duplicate their
     displayed text in the CP932 [テキスト表示] main field and args[1].
-    Matching the raw bytes in that known command body is stronger evidence
-    than trying to decode the same bytes under both codecs.
+    Matching the raw byte body is stronger evidence than trying to decode
+    the same bytes under both codecs.
     """
     if dialogue_encoding != "auto":
         return dialogue_encoding
@@ -185,8 +184,6 @@ def resolve_text_record_encoding(
     if not separator or not header.startswith("[テキスト表示]"):
         return "gbk"
 
-    # Use the raw byte body, not text re-encoded from a decoded string.
-    # This is important because successful CP932/GBK decoding can be ambiguous.
     raw_separator = raw_main.find(b"\n")
     if raw_separator < 0:
         return "gbk"
@@ -240,7 +237,9 @@ def read_script(path: Path) -> Script:
             main_len = read_u32(data, pos, f"record #{index} main length")
             pos += 4
             if main_len > len(data) - pos:
-                raise ScriptError(f"main string exceeds end of file in record #{index}: {path}")
+                raise ScriptError(
+                    f"main string exceeds end of file in record #{index}: {path}"
+                )
             main = data[pos:pos + main_len]
             pos += main_len
 
@@ -256,12 +255,16 @@ def read_script(path: Path) -> Script:
                 args.append(data[pos:pos + arg_len])
                 pos += arg_len
         except struct.error as exc:
-            raise ScriptError(f"invalid record #{index} at 0x{start:X} in {path}") from exc
+            raise ScriptError(
+                f"invalid record #{index} at 0x{start:X} in {path}"
+            ) from exc
 
         records.append(Record(header, nums32, extra, nums16, main, args))
 
     if pos != len(data):
-        raise ScriptError(f"unexpected trailing data in {path}: 0x{pos:X} != 0x{len(data):X}")
+        raise ScriptError(
+            f"unexpected trailing data in {path}: 0x{pos:X} != 0x{len(data):X}"
+        )
     return Script(records)
 
 
@@ -270,10 +273,16 @@ def write_script(script: Script, path: Path) -> None:
     output += pack_u32(len(script.records))
 
     for index, record in enumerate(script.records):
-        if len(record.header) != 4 or len(record.nums32) != 32 or len(record.nums16) != 16:
+        if (
+            len(record.header) != 4
+            or len(record.nums32) != 32
+            or len(record.nums16) != 16
+        ):
             raise ScriptError(f"invalid fixed field count in record #{index}")
         if len(record.args) != 32:
-            raise ScriptError(f"record #{index} must contain exactly 32 argument strings")
+            raise ScriptError(
+                f"record #{index} must contain exactly 32 argument strings"
+            )
 
         output += struct.pack("<4I", *record.header)
         output += struct.pack("<32I", *record.nums32)
@@ -295,7 +304,9 @@ def write_script(script: Script, path: Path) -> None:
             temp_path.unlink()
 
 
-def decode_record_text(record: Record, encoding: str, context: str) -> tuple[str, list[str]]:
+def decode_record_text(
+    record: Record, encoding: str, context: str
+) -> tuple[str, list[str]]:
     main = decode_field(record.main, encoding, f"{context} main")
     args = [
         decode_field(value, encoding, f"{context} arg {index}")
@@ -338,7 +349,9 @@ def scene_choice_header_kind(line: str) -> str | None:
     return None
 
 
-def parse_quoted_choice_row(line: str, line_offset: int) -> list[ChoiceSpan] | None:
+def parse_quoted_choice_row(
+    line: str, line_offset: int
+) -> list[ChoiceSpan] | None:
     """Parse a slash-separated row such as 「A」/「B」 without losing delimiters."""
     pairs = {"「": "」", '"': '"', "『": "』"}
     spans: list[ChoiceSpan] = []
@@ -362,7 +375,9 @@ def parse_quoted_choice_row(line: str, line_offset: int) -> list[ChoiceSpan] | N
         value = line[value_start:value_end]
         if not value:
             return None
-        spans.append(ChoiceSpan(line_offset + value_start, line_offset + value_end, value))
+        spans.append(
+            ChoiceSpan(line_offset + value_start, line_offset + value_end, value)
+        )
         pos = value_end + 1
 
         while pos < length and line[pos].isspace():
@@ -396,7 +411,11 @@ def parse_scene_choice_spans(text: str) -> list[ChoiceSpan] | None:
                 value = body[prefix_length:]
                 if value:
                     choices.append(
-                        ChoiceSpan(offset + prefix_length, offset + len(body), value)
+                        ChoiceSpan(
+                            offset + prefix_length,
+                            offset + len(body),
+                            value,
+                        )
                     )
         else:
             parsed = parse_quoted_choice_row(body, offset)
@@ -407,7 +426,9 @@ def parse_scene_choice_spans(text: str) -> list[ChoiceSpan] | None:
     return choices or None
 
 
-def scene_choices(record: Record, encoding: str) -> tuple[str, str, list[ChoiceSpan]] | None:
+def scene_choices(
+    record: Record, encoding: str
+) -> tuple[str, str, list[ChoiceSpan]] | None:
     """Locate a real choice block in arg[31] or main."""
     if not is_scene_record(record):
         return None
@@ -426,7 +447,9 @@ def scene_choices(record: Record, encoding: str) -> tuple[str, str, list[ChoiceS
 
 
 def replace_scene_choice_text(
-    text: str, choices: list[str], parsed: list[ChoiceSpan] | None = None
+    text: str,
+    choices: list[str],
+    parsed: list[ChoiceSpan] | None = None,
 ) -> str:
     spans = parsed if parsed is not None else parse_scene_choice_spans(text)
     if spans is None:
@@ -468,7 +491,9 @@ def choice_marker_arg_indices(
     return marker_indices
 
 
-def is_choice_record(record: Record, encoding: str, dialogue_encoding: str) -> bool:
+def is_choice_record(
+    record: Record, encoding: str, dialogue_encoding: str
+) -> bool:
     if record.header[3] in (TEXT_OPCODE, SCENE_OPCODE):
         return False
 
@@ -481,7 +506,9 @@ def is_choice_record(record: Record, encoding: str, dialogue_encoding: str) -> b
         for value, _enc in main_candidates
     ):
         return True
-    return bool(choice_marker_arg_indices(record, encoding, dialogue_encoding))
+    return bool(
+        choice_marker_arg_indices(record, encoding, dialogue_encoding)
+    )
 
 
 def extract_choice_targets(
@@ -500,7 +527,9 @@ def extract_choice_targets(
         if main.startswith("選択肢\r"):
             return [("main", -1, main[4:], "選択肢\r", main_encoding)]
 
-    marker_indices = choice_marker_arg_indices(record, encoding, dialogue_encoding)
+    marker_indices = choice_marker_arg_indices(
+        record, encoding, dialogue_encoding
+    )
     if not marker_indices:
         return []
 
@@ -511,14 +540,17 @@ def extract_choice_targets(
         try:
             value = decode_field(raw, choice_encoding, f"choice arg {index}")
         except ScriptError:
-            # Non-text or unrelated command slots are not translatable values.
             continue
         if value:
-            results.append(("arg", index, value, "", choice_encoding))
+            results.append(
+                ("arg", index, value, "", choice_encoding)
+            )
     return results
 
 
-def normalize_line_breaks_with_offsets(text: str) -> tuple[str, list[int]]:
+def normalize_line_breaks_with_offsets(
+    text: str,
+) -> tuple[str, list[int]]:
     """Collapse adjacent line-break characters and retain source-end offsets."""
     normalized: list[str] = []
     offsets: list[int] = []
@@ -568,7 +600,11 @@ def consume_line_break_units(text: str, start: int, count: int) -> int:
 
 
 def make_text_main(
-    name: str, old_name: str, message: str, old_message: str, old_main: str
+    name: str,
+    old_name: str,
+    message: str,
+    old_message: str,
+    old_main: str,
 ) -> str | None:
     """Update dialogue text while preserving the original command header and tail."""
     header, separator, old_body = old_main.partition("\n")
@@ -578,7 +614,6 @@ def make_text_main(
     normalized_body, body_offsets = normalize_line_breaks_with_offsets(old_body)
     normalized_message, _ = normalize_line_breaks_with_offsets(old_message)
     if not normalized_body.startswith(normalized_message):
-        # The main field can be source/reference text rather than a synchronized copy.
         return None
 
     first = header
@@ -589,23 +624,37 @@ def make_text_main(
             speaker_pos = header.find(old_name, len(command))
             if speaker_pos < 0:
                 return None
-            first = header[:speaker_pos] + name + header[speaker_pos + len(old_name):]
+            first = (
+                header[:speaker_pos]
+                + name
+                + header[speaker_pos + len(old_name):]
+            )
         else:
             first = command + " " + name + header_rest
 
     trailing_start, trailing_count = trailing_line_break_units(old_message)
     if trailing_count:
-        content_prefix, _ = normalize_line_breaks_with_offsets(old_message[:trailing_start])
+        content_prefix, _ = normalize_line_breaks_with_offsets(
+            old_message[:trailing_start]
+        )
         normalized_content, _ = normalize_line_breaks_with_offsets(old_body)
         if not normalized_content.startswith(content_prefix):
             raise ScriptError(
                 "cannot safely locate the original dialogue text in the command; "
                 "refusing to discard unknown trailing data"
             )
-        raw_content_end = body_offsets[len(content_prefix) - 1] if content_prefix else 0
-        raw_end = consume_line_break_units(old_body, raw_content_end, trailing_count)
+        raw_content_end = (
+            body_offsets[len(content_prefix) - 1] if content_prefix else 0
+        )
+        raw_end = consume_line_break_units(
+            old_body, raw_content_end, trailing_count
+        )
     else:
-        raw_end = body_offsets[len(normalized_message) - 1] if normalized_message else 0
+        raw_end = (
+            body_offsets[len(normalized_message) - 1]
+            if normalized_message
+            else 0
+        )
     tail = old_body[raw_end:]
 
     display_message = message.replace("\r\n", "\n").replace("\r", "\n")
@@ -613,7 +662,10 @@ def make_text_main(
 
 
 def export_items(
-    script: Script, encoding: str, dialogue_encoding: str, source_name: str
+    script: Script,
+    encoding: str,
+    dialogue_encoding: str,
+    source_name: str,
 ) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for record_index, record in enumerate(script.records):
@@ -622,8 +674,12 @@ def export_items(
             record_encoding = resolve_text_record_encoding(
                 record, encoding, dialogue_encoding, context
             )
-            name = decode_field(record.args[0], record_encoding, f"{context} speaker")
-            message = decode_field(record.args[1], record_encoding, f"{context} message")
+            name = decode_field(
+                record.args[0], record_encoding, f"{context} speaker"
+            )
+            message = decode_field(
+                record.args[1], record_encoding, f"{context} message"
+            )
             if name:
                 items.append({"name": name, "message": message})
             else:
@@ -637,24 +693,34 @@ def export_items(
             continue
 
         if is_choice_record(record, encoding, dialogue_encoding):
-            targets = extract_choice_targets(record, encoding, dialogue_encoding)
+            targets = extract_choice_targets(
+                record, encoding, dialogue_encoding
+            )
             for _target, _arg_index, choice, _prefix, _field_encoding in targets:
                 items.append({"choice": choice})
     return items
 
 
 def take_item(
-    items: list[dict[str, object]], index: int, required_key: str, source_name: str
+    items: list[dict[str, object]],
+    index: int,
+    required_key: str,
+    source_name: str,
 ) -> dict[str, object]:
     if index >= len(items):
         raise ScriptError(
-            f"not enough JSON entries for {source_name}; expected {required_key} at item {index}"
+            f"not enough JSON entries for {source_name}; "
+            f"expected {required_key} at item {index}"
         )
     item = items[index]
     if not isinstance(item, dict) or required_key not in item:
-        raise ScriptError(f"JSON item {index} in {source_name} must contain '{required_key}'")
+        raise ScriptError(
+            f"JSON item {index} in {source_name} must contain '{required_key}'"
+        )
     if not isinstance(item[required_key], str):
-        raise ScriptError(f"JSON item {index} field '{required_key}' must be a string")
+        raise ScriptError(
+            f"JSON item {index} field '{required_key}' must be a string"
+        )
     return item
 
 
@@ -677,12 +743,18 @@ def import_items(
             record_encoding = resolve_text_record_encoding(
                 record, encoding, dialogue_encoding, context
             )
-            old_name = decode_field(record.args[0], record_encoding, f"{context} speaker")
-            old_message = decode_field(record.args[1], record_encoding, f"{context} message")
+            old_name = decode_field(
+                record.args[0], record_encoding, f"{context} speaker"
+            )
+            old_message = decode_field(
+                record.args[1], record_encoding, f"{context} message"
+            )
             name = item.get("name", old_name)
             message = item["message"]
             if not isinstance(name, str) or not isinstance(message, str):
-                raise ScriptError(f"JSON item {item_index} in {source_name} has invalid text fields")
+                raise ScriptError(
+                    f"JSON item {item_index} in {source_name} has invalid text fields"
+                )
             if "\r" in name or "\n" in name:
                 raise ScriptError("speaker names cannot contain line breaks")
 
@@ -698,7 +770,9 @@ def import_items(
                 record_changed = True
 
             if record_changed:
-                main_text = decode_field(record.main, encoding, f"{context} main")
+                main_text = decode_field(
+                    record.main, encoding, f"{context} main"
+                )
                 new_main = make_text_main(
                     name, old_name, message, old_message, main_text
                 )
@@ -718,7 +792,9 @@ def import_items(
                     new_choices.append(item["choice"])
                     item_index += 1
 
-                updated = replace_scene_choice_text(old_text, new_choices, parsed)
+                updated = replace_scene_choice_text(
+                    old_text, new_choices, parsed
+                )
                 if updated != old_text:
                     if field_name == "arg31":
                         raw = record.args[31]
@@ -726,17 +802,24 @@ def import_items(
                             updated, encoding, raw.endswith(b"\0")
                         )
                         try:
-                            main_text = decode_field(record.main, encoding, f"{context} main")
+                            main_text = decode_field(
+                                record.main, encoding, f"{context} main"
+                            )
                         except ScriptError:
                             main_text = ""
                         main_choices = parse_scene_choice_spans(main_text)
-                        if main_choices is not None and len(main_choices) == len(new_choices):
+                        if (
+                            main_choices is not None
+                            and len(main_choices) == len(new_choices)
+                        ):
                             main_updated = replace_scene_choice_text(
                                 main_text, new_choices, main_choices
                             )
                             if main_updated != main_text:
                                 record.main = encode_field(
-                                    main_updated, encoding, record.main.endswith(b"\0")
+                                    main_updated,
+                                    encoding,
+                                    record.main.endswith(b"\0"),
                                 )
                     else:
                         raw = record.main
@@ -745,40 +828,63 @@ def import_items(
                         )
                         try:
                             arg_text = decode_field(
-                                record.args[31], encoding, f"{context} arg 31"
+                                record.args[31],
+                                encoding,
+                                f"{context} arg 31",
                             )
                         except ScriptError:
                             arg_text = ""
                         arg_choices = parse_scene_choice_spans(arg_text)
-                        if arg_choices is not None and len(arg_choices) == len(new_choices):
+                        if (
+                            arg_choices is not None
+                            and len(arg_choices) == len(new_choices)
+                        ):
                             arg_updated = replace_scene_choice_text(
                                 arg_text, new_choices, arg_choices
                             )
                             if arg_updated != arg_text:
                                 record.args[31] = encode_field(
-                                    arg_updated, encoding, record.args[31].endswith(b"\0")
+                                    arg_updated,
+                                    encoding,
+                                    record.args[31].endswith(b"\0"),
                                 )
                     record_changed = True
 
             elif is_choice_record(record, encoding, dialogue_encoding):
-                targets = extract_choice_targets(record, encoding, dialogue_encoding)
-                for target, arg_index, old_choice, prefix, target_encoding in targets:
+                targets = extract_choice_targets(
+                    record, encoding, dialogue_encoding
+                )
+                for (
+                    target,
+                    arg_index,
+                    old_choice,
+                    prefix,
+                    target_encoding,
+                ) in targets:
                     item = take_item(items, item_index, "choice", source_name)
                     new_choice = item["choice"]
                     if not isinstance(new_choice, str):
-                        raise ScriptError(f"JSON item {item_index} choice must be a string")
+                        raise ScriptError(
+                            f"JSON item {item_index} choice must be a string"
+                        )
                     if "\r" in new_choice or "\n" in new_choice:
-                        raise ScriptError("a single choice item cannot contain a line break")
+                        raise ScriptError(
+                            "a single choice item cannot contain a line break"
+                        )
                     if new_choice != old_choice:
                         if target == "main":
                             replacement = prefix + new_choice
                             record.main = encode_field(
-                                replacement, target_encoding, record.main.endswith(b"\0")
+                                replacement,
+                                target_encoding,
+                                record.main.endswith(b"\0"),
                             )
                         else:
                             raw = record.args[arg_index]
                             record.args[arg_index] = encode_field(
-                                new_choice, target_encoding, raw.endswith(b"\0")
+                                new_choice,
+                                target_encoding,
+                                raw.endswith(b"\0"),
                             )
                         record_changed = True
                     item_index += 1
@@ -787,7 +893,9 @@ def import_items(
             changed_records += 1
 
     if item_index != len(items):
-        raise ScriptError(f"{len(items) - item_index} unused JSON item(s) in {source_name}")
+        raise ScriptError(
+            f"{len(items) - item_index} unused JSON item(s) in {source_name}"
+        )
     return changed_records
 
 
@@ -804,18 +912,30 @@ def is_path_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def ensure_output_not_inside(output_path: Path, input_path: Path, label: str) -> None:
-    if path_key(output_path) == path_key(input_path) or is_path_within(output_path, input_path):
-        raise ScriptError(f"{label} must be outside the input path: {input_path}")
+def ensure_output_not_inside(
+    output_path: Path, input_path: Path, label: str
+) -> None:
+    if (
+        path_key(output_path) == path_key(input_path)
+        or is_path_within(output_path, input_path)
+    ):
+        raise ScriptError(
+            f"{label} must be outside the input path: {input_path}"
+        )
 
 
 def export_file(
-    input_path: Path, output_path: Path, encoding: str, dialogue_encoding: str
+    input_path: Path,
+    output_path: Path,
+    encoding: str,
+    dialogue_encoding: str,
 ) -> None:
     if path_key(input_path) == path_key(output_path):
         raise ScriptError("JSON output path cannot overwrite the original script")
     script = read_script(input_path)
-    items = export_items(script, encoding, dialogue_encoding, str(input_path))
+    items = export_items(
+        script, encoding, dialogue_encoding, str(input_path)
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_name(output_path.name + ".tmp")
     try:
@@ -851,14 +971,23 @@ def import_file(
     dialogue_encoding: str,
 ) -> None:
     if path_key(original_path) == path_key(output_path):
-        raise ScriptError("imported script output cannot overwrite the original script")
+        raise ScriptError(
+            "imported script output cannot overwrite the original script"
+        )
     if path_key(json_path) == path_key(output_path):
-        raise ScriptError("imported script output cannot overwrite the translation JSON")
+        raise ScriptError(
+            "imported script output cannot overwrite the translation JSON"
+        )
     script = read_script(original_path)
     items = load_translation(json_path)
-    changed = import_items(script, items, encoding, dialogue_encoding, str(json_path))
+    changed = import_items(
+        script, items, encoding, dialogue_encoding, str(json_path)
+    )
     write_script(script, output_path)
-    print(f"imported {changed} changed record(s): {original_path} + {json_path} -> {output_path}")
+    print(
+        f"imported {changed} changed record(s): "
+        f"{original_path} + {json_path} -> {output_path}"
+    )
 
 
 def iter_files(root: Path) -> list[Path]:
@@ -869,48 +998,100 @@ def iter_files(root: Path) -> list[Path]:
 
 
 def export_path(
-    input_path: Path, output_path: Path, encoding: str, dialogue_encoding: str
+    input_path: Path,
+    output_path: Path,
+    encoding: str,
+    dialogue_encoding: str,
 ) -> None:
     if input_path.is_dir():
-        ensure_output_not_inside(output_path, input_path, "JSON output folder")
+        ensure_output_not_inside(
+            output_path, input_path, "JSON output folder"
+        )
         files = iter_files(input_path)
         if not files:
             raise ScriptError(f"no files found: {input_path}")
 
-        targets: dict[str, Path] = {}
+        # ---------------------------------------------------------
+        # Pass 1: identify valid ADVSCRIPT2 scripts.
+        #
+        # Files without the ADVSCRIPT2 signature are ordinary
+        # resources and must not participate in output-name checks.
+        # A file with the signature but invalid internal structure
+        # is a damaged script and must stop the operation.
+        # ---------------------------------------------------------
+        scripts: list[Path] = []
+
         for file_path in files:
+            try:
+                read_script(file_path)
+            except ScriptError as exc:
+                if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
+                    print(
+                        f"skip non-script file: {file_path}",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise
+
+            scripts.append(file_path)
+
+        if not scripts:
+            raise ScriptError(
+                f"no valid ADVSCRIPT2 files found: {input_path}"
+            )
+
+        # ---------------------------------------------------------
+        # Pass 2: preflight output names for valid scripts only.
+        #
+        # This entire check finishes before the output directory is
+        # created or any JSON file is written.
+        # ---------------------------------------------------------
+        targets: dict[str, Path] = {}
+
+        for file_path in scripts:
             relative = file_path.relative_to(input_path)
             target = (output_path / relative).with_suffix(".json")
             key = path_key(target)
+
             previous = targets.get(key)
             if previous is not None:
                 raise ScriptError(
-                    "multiple source files map to the same JSON output: "
+                    "multiple valid ADVSCRIPT2 scripts map to the same "
+                    "JSON output: "
                     f"{previous.relative_to(input_path)} and {relative}"
                 )
+
             targets[key] = file_path
 
+        # ---------------------------------------------------------
+        # Pass 3: all checks passed; begin exporting.
+        # ---------------------------------------------------------
         output_path.mkdir(parents=True, exist_ok=True)
+
         processed = 0
-        for file_path in files:
+        for file_path in scripts:
             relative = file_path.relative_to(input_path)
-            try:
-                export_file(
-                    file_path,
-                    (output_path / relative).with_suffix(".json"),
-                    encoding,
-                    dialogue_encoding,
-                )
-                processed += 1
-            except ScriptError as exc:
-                if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
-                    print(f"skip non-script file: {file_path}", file=sys.stderr)
-                    continue
-                raise
-        if processed == 0:
-            raise ScriptError(f"no valid ADVSCRIPT2 files found: {input_path}")
+            target = (output_path / relative).with_suffix(".json")
+
+            export_file(
+                file_path,
+                target,
+                encoding,
+                dialogue_encoding,
+            )
+            processed += 1
+
+        print(
+            f"finished: exported {processed} valid ADVSCRIPT2 script(s)"
+        )
+
     else:
-        export_file(input_path, output_path, encoding, dialogue_encoding)
+        export_file(
+            input_path,
+            output_path,
+            encoding,
+            dialogue_encoding,
+        )
 
 
 def import_path(
@@ -923,11 +1104,25 @@ def import_path(
     if original_path.is_dir():
         if not json_path.is_dir():
             raise ScriptError("folder import requires a JSON folder")
-        ensure_output_not_inside(output_path, original_path, "import output folder")
+
+        ensure_output_not_inside(
+            output_path, original_path, "import output folder"
+        )
+
         if is_path_within(json_path, original_path):
-            raise ScriptError("translation JSON folder must be outside the original script folder")
-        if is_path_within(output_path, json_path) or is_path_within(json_path, output_path):
-            raise ScriptError("import output folder and translation JSON folder must be separate")
+            raise ScriptError(
+                "translation JSON folder must be outside the original "
+                "script folder"
+            )
+
+        if (
+            is_path_within(output_path, json_path)
+            or is_path_within(json_path, output_path)
+        ):
+            raise ScriptError(
+                "import output folder and translation JSON folder "
+                "must be separate"
+            )
 
         files = iter_files(original_path)
         if not files:
@@ -935,6 +1130,7 @@ def import_path(
 
         scripts: list[Path] = []
         non_scripts: list[Path] = []
+
         for file_path in files:
             try:
                 read_script(file_path)
@@ -946,53 +1142,102 @@ def import_path(
                 raise
 
         missing_json = [
-            (json_path / file_path.relative_to(original_path)).with_suffix(".json")
+            (
+                json_path / file_path.relative_to(original_path)
+            ).with_suffix(".json")
             for file_path in scripts
-            if not (json_path / file_path.relative_to(original_path)).with_suffix(".json").is_file()
+            if not (
+                json_path / file_path.relative_to(original_path)
+            ).with_suffix(".json").is_file()
         ]
+
         if missing_json:
-            raise ScriptError(f"missing translation JSON for script: {missing_json[0]}")
+            raise ScriptError(
+                f"missing translation JSON for script: {missing_json[0]}"
+            )
 
         output_path.mkdir(parents=True, exist_ok=True)
+
         processed = 0
         copied = 0
+
         for file_path in files:
             relative = file_path.relative_to(original_path)
             destination = output_path / relative
+
             if file_path in non_scripts:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(file_path.read_bytes())
                 copied += 1
                 continue
 
-            source_json = (json_path / relative).with_suffix(".json")
-            import_file(file_path, source_json, destination, encoding, dialogue_encoding)
+            source_json = (
+                json_path / relative
+            ).with_suffix(".json")
+
+            import_file(
+                file_path,
+                source_json,
+                destination,
+                encoding,
+                dialogue_encoding,
+            )
             processed += 1
 
         if processed == 0:
-            raise ScriptError(f"no valid ADVSCRIPT2 files found: {original_path}")
-        print(f"finished: imported {processed} script(s), copied {copied} non-script file(s)")
+            raise ScriptError(
+                f"no valid ADVSCRIPT2 files found: {original_path}"
+            )
+
+        print(
+            f"finished: imported {processed} script(s), "
+            f"copied {copied} non-script file(s)"
+        )
+
     else:
-        import_file(original_path, json_path, output_path, encoding, dialogue_encoding)
+        import_file(
+            original_path,
+            json_path,
+            output_path,
+            encoding,
+            dialogue_encoding,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Extract/import NekoSDK ADVSCRIPT2 dialogue and choice strings as UTF-8 JSON."
+        description=(
+            "Extract/import NekoSDK ADVSCRIPT2 dialogue and "
+            "choice strings as UTF-8 JSON."
+        )
     )
+
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("-e", "--export", action="store_true", help="export script text to JSON")
-    mode.add_argument("-i", "--import-json", action="store_true", help="import edited JSON into scripts")
+    mode.add_argument(
+        "-e",
+        "--export",
+        action="store_true",
+        help="export script text to JSON",
+    )
+    mode.add_argument(
+        "-i",
+        "--import-json",
+        action="store_true",
+        help="import edited JSON into scripts",
+    )
+
     parser.add_argument(
         "paths",
         nargs="+",
         help="export: input output; import: original JSON_folder output",
     )
+
     parser.add_argument(
         "--encoding",
         default=DEFAULT_ENCODING,
         help=f"command/scene encoding (default: {DEFAULT_ENCODING})",
     )
+
     parser.add_argument(
         "--dialogue-encoding",
         default=None,
@@ -1001,22 +1246,38 @@ def main(argv: list[str] | None = None) -> int:
             "(default: same as --encoding)"
         ),
     )
+
     args = parser.parse_args(argv)
 
     try:
         encoding = validate_encoding(args.encoding)
+
         dialogue_encoding = (
             validate_dialogue_encoding(args.dialogue_encoding)
             if args.dialogue_encoding is not None
             else encoding
         )
+
         if args.export:
             if len(args.paths) != 2:
-                parser.error("export requires exactly: input_path output_path")
-            export_path(Path(args.paths[0]), Path(args.paths[1]), encoding, dialogue_encoding)
+                parser.error(
+                    "export requires exactly: input_path output_path"
+                )
+
+            export_path(
+                Path(args.paths[0]),
+                Path(args.paths[1]),
+                encoding,
+                dialogue_encoding,
+            )
+
         else:
             if len(args.paths) != 3:
-                parser.error("import requires exactly: original_path json_path output_path")
+                parser.error(
+                    "import requires exactly: original_path "
+                    "json_folder output_path"
+                )
+
             import_path(
                 Path(args.paths[0]),
                 Path(args.paths[1]),
@@ -1024,11 +1285,14 @@ def main(argv: list[str] | None = None) -> int:
                 encoding,
                 dialogue_encoding,
             )
+
     except (OSError, UnicodeError, ScriptError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    
