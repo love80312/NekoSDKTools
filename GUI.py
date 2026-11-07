@@ -15,6 +15,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from char_manager import CharacterManagerFrame
 
 APP_NAME = "NekoSDKTools 圖形介面"
 TOOL_FILES = {"pak": "pak.py", "scr": "scr.py", "bmp": "bmp_alp.py"}
@@ -25,8 +26,8 @@ class NekoSDKToolsGUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("1000x800")
-        self.root.minsize(880, 680)
+        self.root.geometry("1080x900")
+        self.root.minsize(960, 800)
         self.tool_dir = Path(__file__).resolve().parent
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.process: subprocess.Popen[str] | None = None
@@ -72,13 +73,24 @@ class NekoSDKToolsGUI:
         self.pak_tab = ttk.Frame(self.notebook, padding=12)
         self.scr_tab = ttk.Frame(self.notebook, padding=12)
         self.bmp_tab = ttk.Frame(self.notebook, padding=12)
+        self.char_tab = ttk.Frame(self.notebook, padding=6)
         self.notebook.add(self.pak_tab, text="PAK 封包")
         self.notebook.add(self.scr_tab, text="腳本／JSON")
         self.notebook.add(self.bmp_tab, text="BMP／ALP 圖像")
+        self.notebook.add(self.char_tab, text="字元管理")
+
+
+
 
         self._build_pak_tab()
         self._build_scr_tab()
         self._build_bmp_tab()
+
+        self.char_manager_frame = CharacterManagerFrame(
+            self.char_tab, app_dir=self.tool_dir
+        )
+        self.char_manager_frame.pack(fill="both", expand=True)
+
 
         log_frame = ttk.LabelFrame(outer, text="執行記錄")
         log_frame.pack(fill="both", expand=True, pady=(10, 0))
