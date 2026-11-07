@@ -30,6 +30,36 @@ class BmpAlpError(Exception):
     """Raised when a BMP/ALP pair or image cannot be converted."""
 
 
+def path_key(path: Path) -> str:
+    """Return a case-insensitive resolved path key for collision checks."""
+    return os.path.normcase(str(path.resolve(strict=False))).casefold()
+
+
+def ensure_distinct_paths(paths: list[tuple[Path, str]]) -> None:
+    """Reject output paths that would overwrite an input or each other."""
+    seen: dict[str, tuple[Path, str]] = {}
+    for path, label in paths:
+        key = path_key(path)
+        previous = seen.get(key)
+        if previous is not None:
+            previous_path, previous_label = previous
+            raise BmpAlpError(
+                f"{label} path conflicts with {previous_label}: "
+                f"{path} / {previous_path}"
+            )
+        seen[key] = (path, label)
+
+
+def ensure_output_outside_input(output_folder: Path, input_folder: Path) -> None:
+    output_resolved = output_folder.resolve(strict=False)
+    input_resolved = input_folder.resolve(strict=False)
+    try:
+        output_resolved.relative_to(input_resolved)
+    except ValueError:
+        return
+    raise BmpAlpError("output folder must be outside the input folder")
+
+
 def alpha_stride(width: int, height: int, alpha_size: int) -> int:
     if width <= 0 or height <= 0:
         raise BmpAlpError(f"invalid image size: {width}x{height}")
@@ -90,6 +120,11 @@ def save_image(image: Image.Image, output_path: Path) -> None:
 
 
 def combine_bmp_alp(bmp_path: Path, alp_path: Path, output_path: Path) -> None:
+    ensure_distinct_paths([
+        (bmp_path, "source BMP"),
+        (alp_path, "source ALP"),
+        (output_path, "output image"),
+    ])
     if not bmp_path.is_file():
         raise BmpAlpError(f"BMP file not found: {bmp_path}")
     if not alp_path.is_file():
@@ -118,6 +153,11 @@ def combine_bmp_alp(bmp_path: Path, alp_path: Path, output_path: Path) -> None:
 
 
 def split_image(image_path: Path, bmp_path: Path, alp_path: Path) -> None:
+    ensure_distinct_paths([
+        (image_path, "source image"),
+        (bmp_path, "output BMP"),
+        (alp_path, "output ALP"),
+    ])
     if not image_path.is_file():
         raise BmpAlpError(f"image file not found: {image_path}")
 
@@ -153,10 +193,19 @@ def build_case_insensitive_file_map(root: Path, extension: str) -> dict[str, Pat
 def extract_folder(input_folder: Path, output_folder: Path) -> None:
     if not input_folder.is_dir():
         raise BmpAlpError(f"input is not a folder: {input_folder}")
+    ensure_output_outside_input(output_folder, input_folder)
 
     bmp_files = iter_files(input_folder, {".bmp"})
     if not bmp_files:
         raise BmpAlpError(f"no BMP files found: {input_folder}")
+
+    # Catch case-only duplicate BMP names before they map to the same PNG.
+    seen_bmp: set[str] = set()
+    for bmp_path in bmp_files:
+        key = bmp_path.relative_to(input_folder).with_suffix("").as_posix().casefold()
+        if key in seen_bmp:
+            raise BmpAlpError(f"duplicate case-insensitive BMP name: {key}")
+        seen_bmp.add(key)
 
     alp_map = build_case_insensitive_file_map(input_folder, ".alp")
     extracted = 0
@@ -195,6 +244,7 @@ def extract_folder(input_folder: Path, output_folder: Path) -> None:
 def create_folder(image_folder: Path, output_folder: Path) -> None:
     if not image_folder.is_dir():
         raise BmpAlpError(f"input is not a folder: {image_folder}")
+    ensure_output_outside_input(output_folder, image_folder)
 
     image_files = iter_files(image_folder, IMAGE_EXTENSIONS)
     if not image_files:

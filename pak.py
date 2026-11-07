@@ -149,9 +149,8 @@ def read_archive_index(archive_path: Path) -> tuple[bytes, int, str]:
 
         if archive_type == b"4S":
             # In 4S, the uint32 at offset 10 is the filename length, not the
-            # total index size. There is exactly one entry and no terminator.
-            # The 14-byte header read above already includes this length at
-            # offsets 10..13.
+            # total index size. The 14-byte header read above already includes
+            # this length at offsets 10..13.
             name_size_raw = header[10:14]
             name_size = read_u32(name_size_raw, 0)
             if name_size == 0:
@@ -169,10 +168,7 @@ def read_archive_index(archive_path: Path) -> tuple[bytes, int, str]:
             index = name_size_raw + index_tail
             return index, HEADER_SIZE + remaining_index_size, "4S"
 
-        try:
-            type_name = archive_type.decode("ascii", errors="replace")
-        except Exception:
-            type_name = repr(archive_type)
+        type_name = archive_type.decode("ascii", errors="replace")
         raise PakError(
             f"unsupported NekoSDK archive type: {type_name!r} "
             "(expected 4A or 4S)"
@@ -273,7 +269,13 @@ def safe_output_path(root: Path, entry_name: str) -> Path:
 
 
 def decrypt_zlib_stream(archive: BinaryIO, entry: Entry, output: BinaryIO) -> int:
-    """Decrypt and decompress one entry, including short-payload footers."""
+    """Decrypt and decompress one entry, including short-payload footers.
+
+    The 0x20-byte XOR region can contain both the end of the zlib stream and
+    only part of the four-byte uncompressed-size footer. Read the remaining
+    footer bytes from the archive instead of assuming the whole footer is in
+    the prefix.
+    """
     compressed_size = entry.stored_size - 4
     prefix_size = min(0x20, entry.stored_size)
 
@@ -323,15 +325,17 @@ def decrypt_zlib_stream(archive: BinaryIO, entry: Entry, output: BinaryIO) -> in
     if decompressor.unused_data:
         raise PakError(f"unexpected trailing bytes in zlib stream: {entry.name}")
 
-    # If the compressed stream is shorter than 0x20 bytes, some or all of the
-    # footer was inside the masked prefix and is already decrypted above.
-    if prefix_size > compressed_size:
-        footer = bytes(prefix[compressed_size:])
-    else:
-        footer = archive.read(4)
-
+    # Any footer bytes already read are part of the decrypted prefix. The
+    # archive cursor is immediately after that prefix, so fetch only the
+    # bytes that are still missing (1..4 bytes).
+    footer_prefix = bytes(prefix[compressed_size:]) if prefix_size > compressed_size else b""
+    footer_remaining = 4 - len(footer_prefix)
+    footer = footer_prefix
+    if footer_remaining:
+        footer += archive.read(footer_remaining)
     if len(footer) != 4:
         raise PakError(f"missing unpacked-size footer: {entry.name}")
+
     expected_size = read_u32(footer, 0)
     if written != expected_size:
         raise PakError(
