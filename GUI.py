@@ -15,7 +15,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from char_manager import CharacterManagerFrame
+from char_manager_session import CharacterManagerFrame
 
 APP_NAME = "NekoSDKTools 圖形介面"
 TOOL_FILES = {"pak": "pak.py", "scr": "scr.py", "bmp": "bmp_alp.py"}
@@ -44,16 +44,27 @@ class NekoSDKToolsGUI:
         self.root.after(100, self._poll_events)
 
     def _configure_style(self) -> None:
+        """設定全域字體；字元預覽字體由字元管理模組獨立放大。"""
+        default_font = ("Microsoft JhengHei UI", 11)
+        self.root.option_add("*Font", default_font)
         style = ttk.Style(self.root)
         try:
             style.theme_use("vista" if os.name == "nt" else "clam")
         except tk.TclError:
             pass
-        style.configure("Title.TLabel", font=("Microsoft JhengHei UI", 15, "bold"))
-        style.configure("Hint.TLabel", foreground="#666666")
-        style.configure("Run.TButton", padding=(14, 7))
+        style.configure("TLabel", font=default_font)
+        style.configure("TButton", font=default_font)
+        style.configure("TRadiobutton", font=default_font)
+        style.configure("TCheckbutton", font=default_font)
+        style.configure("TEntry", font=default_font)
+        style.configure("TCombobox", font=default_font)
+        style.configure("TSpinbox", font=default_font)
+        style.configure("TNotebook.Tab", font=default_font, padding=(12, 7))
+        style.configure("Title.TLabel", font=("Microsoft JhengHei UI", 16, "bold"))
+        style.configure("Hint.TLabel", foreground="#666666", font=default_font)
+        style.configure("Run.TButton", font=default_font, padding=(14, 8))
         style.configure("TLabelframe", padding=8)
-        style.configure("TLabelframe.Label", font=("Microsoft JhengHei UI", 10, "bold"))
+        style.configure("TLabelframe.Label", font=("Microsoft JhengHei UI", 11, "bold"))
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=12)
@@ -79,9 +90,6 @@ class NekoSDKToolsGUI:
         self.notebook.add(self.bmp_tab, text="BMP／ALP 圖像")
         self.notebook.add(self.char_tab, text="字元管理")
 
-
-
-
         self._build_pak_tab()
         self._build_scr_tab()
         self._build_bmp_tab()
@@ -90,7 +98,6 @@ class NekoSDKToolsGUI:
             self.char_tab, app_dir=self.tool_dir
         )
         self.char_manager_frame.pack(fill="both", expand=True)
-
 
         log_frame = ttk.LabelFrame(outer, text="執行記錄")
         log_frame.pack(fill="both", expand=True, pady=(10, 0))
@@ -103,7 +110,7 @@ class NekoSDKToolsGUI:
         log_body.pack(fill="both", expand=True)
         # Character wrapping also wraps long paths and command lines without spaces.
         self.log_text = tk.Text(
-            log_body, height=10, wrap="char", font=("Consolas", 9),
+            log_body, height=10, wrap="char", font=("Consolas", 10),
             state="disabled", undo=False,
         )
         yscroll = ttk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
@@ -180,6 +187,7 @@ class NekoSDKToolsGUI:
         if not path.is_dir():
             raise ValueError(f"{label}不存在或不是資料夾：\n{path}")
         return path
+
     def _validate_tool(self, key: str) -> Path:
         path = self.tool_dir / TOOL_FILES[key]
         if not path.is_file():
