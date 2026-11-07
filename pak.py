@@ -3,7 +3,7 @@
 
 Supported archive formats:
 - NEKOPACK4A: indexed archive; supports extraction and repacking.
-- NEKOPACK4S: single-entry archive; extraction only.
+- NEKOPACK4S: single-entry archive; supports extraction and repacking.
 
 File names are stored as CP932. Each payload is a zlib stream followed by
 an uncompressed-size footer; the first 0x20 bytes of the stored payload are
@@ -11,7 +11,11 @@ XOR-masked.
 
 Usage:
   py -3.14 pak.py -u input.pak output_folder
-  py -3.14 pak.py -p input_folder output.pak
+  py -3.14 pak.py -p input_folder output.pak [--format 4A|4S]
+
+Packing format:
+  4A (default): one or more files
+  4S: exactly one file
 
 Optional environment variables for packing:
   NEKO_PAK_LEVEL=0..9       zlib compression level (default: 9)
@@ -421,7 +425,14 @@ def prepare_entry(
     return PreparedEntry(name, name_bytes, temp_path, compressed_size, unpacked_size, stored_size)
 
 
-def build_index(entries: Iterable[PreparedEntry]) -> bytes:
+def build_index(
+    entries: Iterable[PreparedEntry], *, include_terminator: bool = True
+) -> bytes:
+    """Build the common entry records used by both archive variants.
+
+    NEKOPACK4A appends a zero-length terminator. NEKOPACK4S contains exactly
+    one entry and has no terminator.
+    """
     index = bytearray()
     for entry in entries:
         key = signed_byte_sum(entry.name_bytes)
@@ -429,9 +440,10 @@ def build_index(entries: Iterable[PreparedEntry]) -> bytes:
         index += entry.name_bytes
         index += write_u32(xor_u32(entry.offset, key))
         index += write_u32(xor_u32(entry.stored_size, key))
-    index += write_u32(0)
+    if include_terminator:
+        index += write_u32(0)
     if len(index) > UINT32_MAX:
-        raise PakError("archive index is too large for NEKOPACK4A")
+        raise PakError("archive index is too large")
     return bytes(index)
 
 
@@ -490,11 +502,25 @@ def prepare_entries(
     return [entry for entry in prepared if entry is not None]
 
 
-def assign_offsets(entries: list[PreparedEntry]) -> list[PreparedEntry]:
-    index_size = sum(4 + len(entry.name_bytes) + 8 for entry in entries) + 4
-    offset = HEADER_SIZE + index_size
+def assign_offsets(
+    entries: list[PreparedEntry], archive_format: str = "4A"
+) -> list[PreparedEntry]:
+    archive_format = archive_format.upper()
+    if archive_format not in {"4A", "4S"}:
+        raise PakError("archive format must be 4A or 4S")
+    if archive_format == "4S" and len(entries) != 1:
+        raise PakError("NEKOPACK4S requires exactly one file")
+
+    # A format: 10-byte signature/type + 4-byte index-size field + index.
+    # S format: 10-byte signature/type + single-entry index (no size field).
+    index_size = sum(4 + len(entry.name_bytes) + 8 for entry in entries)
+    if archive_format == "4A":
+        index_size += 4  # zero-length terminator
+        offset = HEADER_SIZE + index_size
+    else:
+        offset = len(SIGNATURE) + 2 + index_size
     if index_size > UINT32_MAX:
-        raise PakError("archive index is too large for NEKOPACK4A")
+        raise PakError("archive index is too large")
 
     assigned: list[PreparedEntry] = []
     for entry in entries:
@@ -523,9 +549,13 @@ def pack_archive(
     encoding: str = DEFAULT_ENCODING,
     level: int = DEFAULT_COMPRESSION_LEVEL,
     workers: int = DEFAULT_PACK_WORKERS,
+    archive_format: str = "4A",
 ) -> None:
     if not source_dir.is_dir():
         raise PakError(f"source folder not found: {source_dir}")
+    archive_format = archive_format.upper()
+    if archive_format not in {"4A", "4S"}:
+        raise PakError("archive format must be 4A or 4S")
     if not 0 <= level <= 9:
         raise PakError("compression level must be between 0 and 9")
     if workers < 1:
@@ -541,18 +571,25 @@ def pack_archive(
         raise PakError("output PAK must be outside the source folder")
 
     names = iter_source_names(source_dir, encoding)
+    if archive_format == "4S" and len(names) != 1:
+        raise PakError(
+            f"NEKOPACK4S requires exactly one file; found {len(names)} files in {source_dir}"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     temp_output = output_path.with_name(output_path.name + ".tmp")
     try:
         with tempfile.TemporaryDirectory(prefix="neko_pak_") as temp_root:
             prepared = prepare_entries(source_dir, names, encoding, level, Path(temp_root), workers)
-            assigned = assign_offsets(prepared)
-            index = build_index(assigned)
+            assigned = assign_offsets(prepared, archive_format)
+            index = build_index(assigned, include_terminator=(archive_format == "4A"))
 
             with temp_output.open("wb") as output:
-                output.write(MAGIC)
-                output.write(write_u32(len(index)))
+                if archive_format == "4A":
+                    output.write(MAGIC)
+                    output.write(write_u32(len(index)))
+                else:
+                    output.write(MAGIC_SINGLE)
                 output.write(index)
                 for entry in assigned:
                     write_encrypted_payload(
@@ -563,7 +600,7 @@ def pack_archive(
         if temp_output.exists():
             temp_output.unlink()
 
-    print(f"packed {len(names)} file(s) to {output_path}")
+    print(f"packed {len(names)} file(s) as NEKOPACK{archive_format} to {output_path}")
 
 
 def env_positive_int(name: str, default: int) -> int:
@@ -596,33 +633,83 @@ def usage() -> str:
     return (
         "Usage:\n"
         "  pak.py -u input.pak output_folder\n"
-        "  pak.py -p input_folder output.pak\n"
+        "  pak.py -p input_folder output.pak [--format 4A|4S]\n"
         "\n"
-        "Extraction supports NEKOPACK4A and NEKOPACK4S.\n"
-        "Packing outputs NEKOPACK4A.\n"
+        "Formats:\n"
+        "  4A  multi-entry archive (default; one or more files)\n"
+        "  4S  single-entry archive (exactly one file)\n"
         "\n"
+        "Extraction supports both NEKOPACK4A and NEKOPACK4S.\n"
         "Packing options:\n"
-        "  NEKO_PAK_LEVEL=0..9       compression level (default 9)\n"
-        "  NEKO_PAK_WORKERS=1..N     workers (default 1)\n"
+        "  --format 4A|4S           output archive format (default: 4A)\n"
+        "  NEKO_PAK_LEVEL=0..9      zlib compression level (default: 9)\n"
+        "  NEKO_PAK_WORKERS=1..N    concurrent compression workers (default: 1)\n"
     )
+
+
+def parse_cli_args(args: list[str]) -> tuple[str, Path, Path, str] | None:
+    """Parse the legacy -u/-p command syntax plus optional --format."""
+    if not args or "--help" in args or "-h" in args:
+        return None
+
+    mode: str | None = None
+    positional: list[str] = []
+    archive_format = "4A"
+    i = 0
+    while i < len(args):
+        item = args[i]
+        if item in ("-u", "-p"):
+            if mode is not None:
+                raise PakError("choose only one operation: -u or -p")
+            mode = item
+            i += 1
+            continue
+        if item == "--format":
+            if i + 1 >= len(args):
+                raise PakError("--format requires 4A or 4S")
+            archive_format = args[i + 1].upper()
+            i += 2
+            continue
+        if item.startswith("--format="):
+            archive_format = item.split("=", 1)[1].upper()
+            i += 1
+            continue
+        if item.startswith("-"):
+            raise PakError(f"unknown option: {item}")
+        positional.append(item)
+        i += 1
+
+    if mode not in ("-u", "-p") or len(positional) != 2:
+        return None
+    if archive_format not in ("4A", "4S"):
+        raise PakError("--format must be 4A or 4S")
+    if mode == "-u" and archive_format != "4A":
+        raise PakError("--format is only valid with -p (packing)")
+    return mode, Path(positional[0]), Path(positional[1]), archive_format
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 3 or args[0] not in ("-u", "-p"):
-        print(usage(), file=sys.stderr, end="")
-        return 2
+    if not args or "--help" in args or "-h" in args:
+        print(usage(), end="")
+        return 0 if args else 2
 
     try:
-        if args[0] == "-u":
-            unpack_archive(Path(args[1]), Path(args[2]), DEFAULT_ENCODING)
+        parsed = parse_cli_args(args)
+        if parsed is None:
+            print(usage(), file=sys.stderr, end="")
+            return 2
+        mode, source, destination, archive_format = parsed
+        if mode == "-u":
+            unpack_archive(source, destination, DEFAULT_ENCODING)
         else:
             pack_archive(
-                Path(args[1]),
-                Path(args[2]),
+                source,
+                destination,
                 DEFAULT_ENCODING,
                 env_compression_level(),
                 env_positive_int("NEKO_PAK_WORKERS", DEFAULT_PACK_WORKERS),
+                archive_format,
             )
     except (OSError, UnicodeError, zlib.error, PakError) as exc:
         print(f"error: {exc}", file=sys.stderr)
