@@ -38,6 +38,7 @@ class NekoSDKToolsGUI:
         self.worker: threading.Thread | None = None
         self.running = False
         self.cancel_requested = False
+        self._run_log_lines: list[str] = []
         self.start_buttons: list[ttk.Button] = []
         self.cancel_buttons: list[ttk.Button] = []
         self.progressbars: list[ttk.Progressbar] = []
@@ -235,6 +236,7 @@ class NekoSDKToolsGUI:
             env.update(env_values)
 
         self.cancel_requested = False
+        self._run_log_lines = []
         self._set_busy(True)
         self.status_var.set("執行中…")
         self._append_log("\n" + "=" * 72 + "\n")
@@ -282,7 +284,11 @@ class NekoSDKToolsGUI:
             while True:
                 kind, payload = self.event_queue.get_nowait()
                 if kind == "log":
-                    self._append_log(str(payload))
+                    line = str(payload)
+                    self._run_log_lines.append(line)
+                    if len(self._run_log_lines) > 200:
+                        del self._run_log_lines[:-200]
+                    self._append_log(line)
                 elif kind == "finished":
                     code, output_path = payload  # type: ignore[misc]
                     self.process = None
@@ -296,11 +302,61 @@ class NekoSDKToolsGUI:
                         if output_path is not None:
                             self._append_log(f"輸出位置：{output_path}\n")
                     else:
-                        self.status_var.set(f"失敗（結束代碼 {code}）")
-                        self._append_log(f"\n作業失敗，結束代碼：{code}\n")
+                        short_reason, explanation = self._exit_code_explanation(code)
+                        detail = self._last_run_error_detail()
+                        self.status_var.set(f"失敗（代碼 {code}：{short_reason}）")
+                        self._append_log(
+                            f"\n作業失敗，結束代碼：{code}\n"
+                            f"錯誤說明：{explanation}\n"
+                        )
+                        if detail:
+                            self._append_log(f"詳細錯誤：{detail}\n")
+                        dialog = f"結束代碼：{code}\n原因：{explanation}"
+                        if detail:
+                            dialog += f"\n\n詳細錯誤：\n{detail}"
+                        messagebox.showerror("作業失敗", dialog, parent=self.root)
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
+
+    @staticmethod
+    def _exit_code_explanation(code: int) -> tuple[str, str]:
+        """Return a user-facing summary for common Python/tool exit codes."""
+        if code == 0:
+            return ("成功", "工具已正常完成。")
+        if code == 1:
+            return (
+                "工具處理失敗",
+                "工具執行時遇到資料或檔案錯誤，常見原因包括格式不符、字串編碼不符、JSON 內容錯誤，或檔案無法讀寫。請參考下方詳細錯誤。",
+            )
+        if code == 2:
+            return (
+                "命令列參數錯誤",
+                "傳入的操作模式、參數數量或路徑格式不正確。請確認來源、輸出及必要參數。",
+            )
+        if code == -1:
+            return (
+                "工具啟動失敗",
+                "無法啟動 Python 子程序。請確認 Python 執行環境、工具檔案及執行權限。",
+            )
+        if code == 130:
+            return ("程序中斷", "工具收到中斷訊號而結束。")
+        return (
+            "非預期的結束代碼",
+            f"工具以未列入常見錯誤對照的代碼 {code} 結束；請查看執行記錄末段。",
+        )
+
+    def _last_run_error_detail(self) -> str:
+        """Extract the most useful error line from the child process output."""
+        for line in reversed(self._run_log_lines):
+            value = line.strip()
+            if value.lower().startswith("error:"):
+                return value[6:].strip()
+            if value.startswith("執行失敗："):
+                return value
+            if value.lower().startswith("usage:"):
+                return value
+        return ""
 
     def stop_process(self) -> None:
         process = self.process
@@ -455,6 +511,9 @@ class NekoSDKToolsGUI:
         self.scr_json = tk.StringVar()
         self.scr_output = tk.StringVar()
         self.scr_encoding = tk.StringVar(value="cp932")
+        self.scr_dialogue_encoding = tk.StringVar(value="cp932")
+        self.scr_output_auto = True
+        self.scr_source.trace_add("write", lambda *_: self._scr_source_changed())
 
         mode_box = ttk.LabelFrame(frame, text="操作")
         mode_box.pack(fill="x", pady=(0, 10))
@@ -480,18 +539,23 @@ class NekoSDKToolsGUI:
 
         encoding = ttk.LabelFrame(frame, text="腳本字串編碼")
         encoding.pack(fill="x", pady=(0, 10))
-        ttk.Label(encoding, text="編碼名稱：").pack(side="left", padx=(4, 5), pady=5)
-        encoding_box = ttk.Combobox(
-            encoding, textvariable=self.scr_encoding, width=18,
-            values=("cp932", "shift_jis", "utf-8", "utf-8-sig", "gbk", "big5"),
+        encoding_values = ("cp932", "shift_jis", "utf-8", "utf-8-sig", "gbk", "big5")
+        ttk.Label(encoding, text="指令／場景：").grid(row=0, column=0, sticky="w", padx=(4, 5), pady=4)
+        self.scr_encoding_box = ttk.Combobox(
+            encoding, textvariable=self.scr_encoding, width=14, values=encoding_values
         )
-        encoding_box.pack(side="left", pady=5)
+        self.scr_encoding_box.grid(row=0, column=1, sticky="w", pady=4)
+        ttk.Label(encoding, text="對話／說話者：").grid(row=0, column=2, sticky="w", padx=(18, 5), pady=4)
+        self.scr_dialogue_encoding_box = ttk.Combobox(
+            encoding, textvariable=self.scr_dialogue_encoding, width=14, values=encoding_values
+        )
+        self.scr_dialogue_encoding_box.grid(row=0, column=3, sticky="w", pady=4)
         ttk.Label(
             encoding,
-            text="預設 CP932。這是遊戲腳本的讀寫編碼，不是 JSON 編碼；改成 UTF-8 不代表遊戲支援中文。",
+            text="兩者預設 CP932。若日文指令搭配 GBK 中文對話，請設為：指令／場景 CP932、對話／說話者 GBK。JSON 固定使用 UTF-8。",
             style="Hint.TLabel",
-            wraplength=700,
-        ).pack(side="left", padx=12, pady=5)
+            wraplength=840,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", padx=4, pady=(2, 4))
 
         actions = ttk.Frame(frame)
         actions.pack(fill="x")
@@ -513,23 +577,47 @@ class NekoSDKToolsGUI:
         self.scr_json_label.configure(text="翻譯 JSON／資料夾：")
         self.scr_output_label.configure(text="輸出 JSON／資料夾：" if exporting else "輸出腳本／資料夾：")
         self.scr_run_button.configure(text="開始匯出 JSON" if exporting else "開始匯入腳本")
+        self._scr_apply_default_output()
+
+    def _scr_source_changed(self) -> None:
+        # A changed source selects a fresh automatic destination unless the user
+        # subsequently chooses or edits a custom output path.
+        self.scr_output_auto = True
+        self._scr_apply_default_output()
+
+    def _scr_default_output_path(self, source: Path) -> Path:
+        exporting = self.scr_mode.get() == "export"
+        if source.is_dir():
+            suffix = "_json" if exporting else "_imported"
+            return source.with_name(source.name + suffix)
+        if exporting:
+            return source.with_suffix(".json")
+        return source.with_name(source.stem + "_imported" + source.suffix)
+
+    def _scr_apply_default_output(self) -> None:
+        source_text = self.scr_source.get().strip()
+        if not source_text or not self.scr_output_auto:
+            return
+        source = self._resolved(source_text)
+        if source.exists():
+            self.scr_output.set(str(self._scr_default_output_path(source)))
 
     def _scr_pick_source_file(self) -> None:
-        value = filedialog.askopenfilename(title="選擇 ADVSCRIPT2 腳本／TXT", filetypes=[("腳本或 TXT", "*.txt *.bin"), ("所有檔案", "*.*")])
+        value = filedialog.askopenfilename(
+            title="選擇 ADVSCRIPT2 腳本／TXT",
+            filetypes=[("腳本或 TXT", "*.txt *.bin"), ("所有檔案", "*.*")],
+        )
         if value:
             self.scr_source.set(value)
-            p = Path(value)
-            if self.scr_mode.get() == "export":
-                self.scr_output.set(str(p.with_suffix(".json")))
-            else:
-                self.scr_output.set(str(p.with_name(p.stem + "_imported" + p.suffix)))
+            self.scr_output_auto = True
+            self.scr_output.set(str(self._scr_default_output_path(Path(value))))
 
     def _scr_pick_source_folder(self) -> None:
         value = filedialog.askdirectory(title="選擇腳本解包資料夾")
         if value:
             self.scr_source.set(value)
-            p = Path(value)
-            self.scr_output.set(str(p.with_name(p.name + ("_json" if self.scr_mode.get() == "export" else "_imported"))))
+            self.scr_output_auto = True
+            self.scr_output.set(str(self._scr_default_output_path(Path(value))))
 
     def _scr_pick_json_file(self) -> None:
         value = filedialog.askopenfilename(title="選擇翻譯 JSON", filetypes=[("JSON", "*.json"), ("所有檔案", "*.*")])
@@ -543,24 +631,37 @@ class NekoSDKToolsGUI:
 
     def _scr_pick_output_file(self) -> None:
         exporting = self.scr_mode.get() == "export"
+        current = self.scr_output.get().strip()
+        current_path = self._resolved(current) if current else None
+        initial_dir = str(current_path.parent) if current_path is not None else None
+        initial_file = current_path.name if current_path is not None else None
         value = filedialog.asksaveasfilename(
             title="設定輸出檔案",
+            initialdir=initial_dir,
+            initialfile=initial_file,
             defaultextension=".json" if exporting else ".txt",
             filetypes=[("JSON", "*.json"), ("所有檔案", "*.*")] if exporting else [("腳本／TXT", "*.txt"), ("所有檔案", "*.*")],
         )
         if value:
             self.scr_output.set(value)
+            self.scr_output_auto = False
 
     def _scr_pick_output_folder(self) -> None:
         value = filedialog.askdirectory(title="選擇輸出資料夾")
         if value:
             self.scr_output.set(value)
+            self.scr_output_auto = False
 
     def run_scr(self) -> None:
         try:
             self._validate_tool("scr")
-            if not self.scr_encoding.get().strip():
-                raise ValueError("請指定腳本字串編碼。")
+            command_encoding = self.scr_encoding.get().strip()
+            dialogue_encoding = self.scr_dialogue_encoding.get().strip()
+            if not command_encoding:
+                raise ValueError("請指定指令／場景編碼。")
+            if not dialogue_encoding:
+                raise ValueError("請指定對話／說話者編碼。")
+
             source_value = self.scr_source.get()
             if not source_value.strip():
                 raise ValueError("請指定原始腳本或資料夾。")
@@ -574,22 +675,48 @@ class NekoSDKToolsGUI:
             else:
                 raise ValueError("來源必須是檔案或資料夾。")
 
-            if not self.scr_output.get().strip():
-                raise ValueError("請指定輸出路徑。")
-            output = self._resolved(self.scr_output.get())
+            output_value = self.scr_output.get().strip()
+            default_output = self._scr_default_output_path(source)
+            if not output_value:
+                output = default_output
+                self.scr_output.set(str(output))
+                self.scr_output_auto = True
+            elif self.scr_output_auto:
+                current_output = self._resolved(output_value)
+                generated_output = self._resolved(str(default_output))
+                if current_output == generated_output:
+                    output = default_output
+                else:
+                    # The user manually edited the destination field.
+                    output = current_output
+                    self.scr_output_auto = False
+            else:
+                output = self._resolved(output_value)
+
+            # If a folder was picked in the output row during single-file mode,
+            # treat it as the destination folder and append the generated filename.
+            if mode == "file" and output.exists() and output.is_dir():
+                output = output / self._scr_default_output_path(source).name
+                self.scr_output.set(str(output))
+
             expected_output_is_dir = mode == "folder"
             if expected_output_is_dir and output.exists() and not output.is_dir():
-                raise ValueError("資料夾模式的輸出路徑必須是資料夾。")
+                raise ValueError(f"資料夾模式的輸出路徑已被同名檔案佔用：\n{output}")
             if not expected_output_is_dir and output.exists() and output.is_dir():
-                raise ValueError("單檔模式的輸出路徑必須是檔案。")
+                raise ValueError(f"單檔模式的輸出路徑必須是檔案：\n{output}")
             if output == source:
                 raise ValueError("輸出路徑不能與原始來源相同。")
+            if mode == "file":
+                output.parent.mkdir(parents=True, exist_ok=True)
             if mode == "folder" and self._is_inside(output, source):
                 raise ValueError("輸出資料夾不能放在原始來源資料夾內。")
 
-            encoding = self.scr_encoding.get().strip()
             if self.scr_mode.get() == "export":
-                args = ["--export", str(source), str(output), "--encoding", encoding]
+                args = [
+                    "--export", str(source), str(output),
+                    "--encoding", command_encoding,
+                    "--dialogue-encoding", dialogue_encoding,
+                ]
             else:
                 json_value = self.scr_json.get()
                 if not json_value.strip():
@@ -601,7 +728,11 @@ class NekoSDKToolsGUI:
                     raise ValueError("來源是單一檔案時，翻譯 JSON 也必須指定單一檔案。")
                 if mode == "folder" and (json_path == source or self._is_inside(json_path, source)):
                     raise ValueError("JSON 資料夾不能放在原始腳本資料夾內。")
-                args = ["--import-json", str(source), str(json_path), str(output), "--encoding", encoding]
+                args = [
+                    "--import-json", str(source), str(json_path), str(output),
+                    "--encoding", command_encoding,
+                    "--dialogue-encoding", dialogue_encoding,
+                ]
 
             if not self._confirm_output(output, "腳本工具輸出"):
                 return

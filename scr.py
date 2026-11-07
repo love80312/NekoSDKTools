@@ -5,15 +5,18 @@ The input files are binary ADVSCRIPT2 streams even though their file names
 usually end in .txt. This tool exports translatable dialogue/choice strings
 as UTF-8 JSON and can import the edited JSON back into the original script.
 
-Default script encoding is CP932 (Shift-JIS compatible), matching the tested
-archive. Use --encoding only when the target game is known to use another
-encoding. Changing the byte encoding does not make the game engine support it.
+Default command/scene encoding is CP932 (Shift-JIS compatible). Dialogue text
+can use a different encoding; --dialogue-encoding defaults to --encoding for
+backward compatibility. For scripts with Japanese commands and GBK dialogue,
+use --encoding cp932 --dialogue-encoding gbk.
+
+Changing the byte encoding does not make the game engine support it.
 
 Usage:
   py -3.13 scr.py -e extracted_folder json_folder
   py -3.13 scr.py -i extracted_folder json_folder imported_folder
-  py -3.13 scr.py -e input.txt output.json --encoding cp932
-  py -3.13 scr.py -i input.txt input.json output.txt --encoding cp932
+  py -3.13 scr.py -e input.txt output.json --encoding cp932 --dialogue-encoding gbk
+  py -3.13 scr.py -i input.txt input.json output.txt --encoding cp932 --dialogue-encoding gbk
 """
 
 from __future__ import annotations
@@ -97,6 +100,24 @@ def decode_field(raw: bytes, encoding: str, context: str) -> str:
         return raw.decode(encoding, errors="strict")
     except UnicodeDecodeError as exc:
         raise ScriptError(f"cannot decode {context} with {encoding}: {exc}") from exc
+
+
+def decode_field_with_fallback(
+    raw: bytes, encoding: str, fallback_encoding: str, context: str
+) -> tuple[str, str]:
+    """Decode a field using its primary encoding, then its known text fallback."""
+    try:
+        return decode_field(raw, encoding, context), encoding
+    except ScriptError as primary_error:
+        if fallback_encoding == encoding:
+            raise
+        try:
+            return decode_field(raw, fallback_encoding, context), fallback_encoding
+        except ScriptError as fallback_error:
+            raise ScriptError(
+                f"cannot decode {context} with {encoding} or {fallback_encoding}; "
+                f"primary error: {primary_error}; fallback error: {fallback_error}"
+            ) from fallback_error
 
 
 def encode_field(text: str, encoding: str, keep_nul: bool) -> bytes:
@@ -364,7 +385,7 @@ def replace_scene_choice_text(
     return "".join(output)
 
 
-def is_choice_record(record: Record, encoding: str) -> bool:
+def is_choice_record(record: Record, encoding: str, dialogue_encoding: str) -> bool:
     if record.header[3] in (TEXT_OPCODE, SCENE_OPCODE):
         return False
     main = decode_field(record.main, encoding, "choice main")
@@ -373,27 +394,39 @@ def is_choice_record(record: Record, encoding: str) -> bool:
     for index, raw in enumerate(record.args):
         if index in (30, 31) or not has_content(raw):
             continue
-        value = decode_field(raw, encoding, f"choice arg {index}")
+        # Other opcodes may carry translated GBK text in args. Such fields are
+        # not command strings and must not abort choice detection when CP932
+        # cannot decode them.
+        try:
+            value, _field_encoding = decode_field_with_fallback(
+                raw, encoding, dialogue_encoding, f"choice arg {index}"
+            )
+        except ScriptError:
+            continue
         if any(marker in value for marker in ("[選択", "選択肢", "[セレクト")):
             return True
     return False
 
 
-def extract_choice_targets(record: Record, encoding: str) -> list[tuple[str, int, str, str]]:
+def extract_choice_targets(
+    record: Record, encoding: str, dialogue_encoding: str
+) -> list[tuple[str, int, str, str, str]]:
     main = decode_field(record.main, encoding, "choice main")
     if main.startswith("選択肢\r\n"):
-        return [("main", -1, main[5:], "選択肢\r\n")]
+        return [("main", -1, main[5:], "選択肢\r\n", encoding)]
     if main.startswith("選択肢\n"):
-        return [("main", -1, main[4:], "選択肢\n")]
+        return [("main", -1, main[4:], "選択肢\n", encoding)]
     if main.startswith("選択肢\r"):
-        return [("main", -1, main[4:], "選択肢\r")]
+        return [("main", -1, main[4:], "選択肢\r", encoding)]
 
-    results: list[tuple[str, int, str, str]] = []
+    results: list[tuple[str, int, str, str, str]] = []
     for index, raw in enumerate(record.args):
         if index in (30, 31) or not has_content(raw):
             continue
-        value = decode_field(raw, encoding, f"choice arg {index}")
-        results.append(("arg", index, value, ""))
+        value, field_encoding = decode_field_with_fallback(
+            raw, encoding, dialogue_encoding, f"choice arg {index}"
+        )
+        results.append(("arg", index, value, "", field_encoding))
     return results
 
 
@@ -509,27 +542,32 @@ def make_text_main(
     return f"{first}\n{display_message}{tail}"
 
 
-def export_items(script: Script, encoding: str, source_name: str) -> list[dict[str, str]]:
+def export_items(
+    script: Script, encoding: str, dialogue_encoding: str, source_name: str
+) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
     for record_index, record in enumerate(script.records):
         context = f"{source_name} record {record_index}"
         if is_text_record(record):
-            name = decode_field(record.args[0], encoding, f"{context} speaker")
-            message = decode_field(record.args[1], encoding, f"{context} message")
+            name = decode_field(record.args[0], dialogue_encoding, f"{context} speaker")
+            message = decode_field(record.args[1], dialogue_encoding, f"{context} message")
             if name:
                 items.append({"name": name, "message": message})
             else:
                 items.append({"message": message})
             continue
 
+        # Scene/choice commands are control strings and retain --encoding.
         parsed_scene = scene_choices(record, encoding)
         if parsed_scene is not None:
             for choice in parsed_scene[2]:
                 items.append({"choice": choice.value})
             continue
 
-        if is_choice_record(record, encoding):
-            for _target, _arg_index, choice, _prefix in extract_choice_targets(record, encoding):
+        if is_choice_record(record, encoding, dialogue_encoding):
+            for _target, _arg_index, choice, _prefix, _field_encoding in extract_choice_targets(
+                record, encoding, dialogue_encoding
+            ):
                 items.append({"choice": choice})
 
     return items
@@ -546,7 +584,10 @@ def take_item(items: list[dict[str, object]], index: int, required_key: str, sou
     return item
 
 
-def import_items(script: Script, items: list[dict[str, object]], encoding: str, source_name: str) -> int:
+def import_items(
+    script: Script, items: list[dict[str, object]], encoding: str,
+    dialogue_encoding: str, source_name: str
+) -> int:
     item_index = 0
     changed_records = 0
 
@@ -556,8 +597,8 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
 
         if is_text_record(record):
             item = take_item(items, item_index, "message", source_name)
-            old_name = decode_field(record.args[0], encoding, f"{context} speaker")
-            old_message = decode_field(record.args[1], encoding, f"{context} message")
+            old_name = decode_field(record.args[0], dialogue_encoding, f"{context} speaker")
+            old_message = decode_field(record.args[1], dialogue_encoding, f"{context} message")
             name = item.get("name", old_name)
             message = item["message"]
             if not isinstance(name, str) or not isinstance(message, str):
@@ -566,10 +607,10 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
                 raise ScriptError("speaker names cannot contain line breaks")
 
             if name != old_name:
-                record.args[0] = encode_field(name, encoding, record.args[0].endswith(b"\0"))
+                record.args[0] = encode_field(name, dialogue_encoding, record.args[0].endswith(b"\0"))
                 record_changed = True
             if message != old_message:
-                record.args[1] = encode_field(message, encoding, record.args[1].endswith(b"\0"))
+                record.args[1] = encode_field(message, dialogue_encoding, record.args[1].endswith(b"\0"))
                 record_changed = True
 
             if record_changed:
@@ -622,9 +663,9 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
                                 )
                     record_changed = True
 
-            elif is_choice_record(record, encoding):
-                targets = extract_choice_targets(record, encoding)
-                for target, arg_index, old_choice, prefix in targets:
+            elif is_choice_record(record, encoding, dialogue_encoding):
+                targets = extract_choice_targets(record, encoding, dialogue_encoding)
+                for target, arg_index, old_choice, prefix, target_encoding in targets:
                     item = take_item(items, item_index, "choice", source_name)
                     new_choice = item["choice"]
                     if not isinstance(new_choice, str):
@@ -637,7 +678,9 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
                             record.main = encode_field(replacement, encoding, record.main.endswith(b"\0"))
                         else:
                             raw = record.args[arg_index]
-                            record.args[arg_index] = encode_field(new_choice, encoding, raw.endswith(b"\0"))
+                            record.args[arg_index] = encode_field(
+                                new_choice, target_encoding, raw.endswith(b"\0")
+                            )
                         record_changed = True
                     item_index += 1
 
@@ -649,9 +692,11 @@ def import_items(script: Script, items: list[dict[str, object]], encoding: str, 
     return changed_records
 
 
-def export_file(input_path: Path, output_path: Path, encoding: str) -> None:
+def export_file(
+    input_path: Path, output_path: Path, encoding: str, dialogue_encoding: str
+) -> None:
     script = read_script(input_path)
-    items = export_items(script, encoding, str(input_path))
+    items = export_items(script, encoding, dialogue_encoding, str(input_path))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_name(output_path.name + ".tmp")
     try:
@@ -679,10 +724,13 @@ def load_translation(path: Path) -> list[dict[str, object]]:
     return value
 
 
-def import_file(original_path: Path, json_path: Path, output_path: Path, encoding: str) -> None:
+def import_file(
+    original_path: Path, json_path: Path, output_path: Path,
+    encoding: str, dialogue_encoding: str
+) -> None:
     script = read_script(original_path)
     items = load_translation(json_path)
-    changed = import_items(script, items, encoding, str(json_path))
+    changed = import_items(script, items, encoding, dialogue_encoding, str(json_path))
     write_script(script, output_path)
     print(f"imported {changed} changed record(s): {original_path} + {json_path} -> {output_path}")
 
@@ -691,7 +739,9 @@ def iter_files(root: Path) -> list[Path]:
     return sorted((path for path in root.rglob("*") if path.is_file()), key=lambda p: p.as_posix().casefold())
 
 
-def export_path(input_path: Path, output_path: Path, encoding: str) -> None:
+def export_path(
+    input_path: Path, output_path: Path, encoding: str, dialogue_encoding: str
+) -> None:
     if input_path.is_dir():
         files = iter_files(input_path)
         if not files:
@@ -701,7 +751,10 @@ def export_path(input_path: Path, output_path: Path, encoding: str) -> None:
         for file_path in files:
             relative = file_path.relative_to(input_path)
             try:
-                export_file(file_path, (output_path / relative).with_suffix(".json"), encoding)
+                export_file(
+                    file_path, (output_path / relative).with_suffix(".json"),
+                    encoding, dialogue_encoding
+                )
                 processed += 1
             except ScriptError as exc:
                 if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
@@ -711,10 +764,13 @@ def export_path(input_path: Path, output_path: Path, encoding: str) -> None:
         if processed == 0:
             raise ScriptError(f"no valid ADVSCRIPT2 files found: {input_path}")
     else:
-        export_file(input_path, output_path, encoding)
+        export_file(input_path, output_path, encoding, dialogue_encoding)
 
 
-def import_path(original_path: Path, json_path: Path, output_path: Path, encoding: str) -> None:
+def import_path(
+    original_path: Path, json_path: Path, output_path: Path,
+    encoding: str, dialogue_encoding: str
+) -> None:
     if original_path.is_dir():
         if not json_path.is_dir():
             raise ScriptError("folder import requires a JSON folder")
@@ -740,14 +796,14 @@ def import_path(original_path: Path, json_path: Path, output_path: Path, encodin
             source_json = (json_path / relative).with_suffix(".json")
             if not source_json.is_file():
                 raise ScriptError(f"missing translation JSON for script: {source_json}")
-            import_file(file_path, source_json, destination, encoding)
+            import_file(file_path, source_json, destination, encoding, dialogue_encoding)
             processed += 1
 
         if processed == 0:
             raise ScriptError(f"no valid ADVSCRIPT2 files found: {original_path}")
         print(f"finished: imported {processed} script(s), copied {copied} non-script file(s)")
     else:
-        import_file(original_path, json_path, output_path, encoding)
+        import_file(original_path, json_path, output_path, encoding, dialogue_encoding)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -758,19 +814,34 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("-e", "--export", action="store_true", help="export script text to JSON")
     mode.add_argument("-i", "--import-json", action="store_true", help="import edited JSON into scripts")
     parser.add_argument("paths", nargs="+", help="export: input output; import: original JSON_folder output")
-    parser.add_argument("--encoding", default=DEFAULT_ENCODING, help=f"script text encoding (default: {DEFAULT_ENCODING})")
+    parser.add_argument(
+        "--encoding", default=DEFAULT_ENCODING,
+        help=f"command/scene encoding (default: {DEFAULT_ENCODING})",
+    )
+    parser.add_argument(
+        "--dialogue-encoding", default=None,
+        help="dialogue speaker/message encoding (default: same as --encoding)",
+    )
     args = parser.parse_args(argv)
 
     try:
         encoding = validate_encoding(args.encoding)
+        dialogue_encoding = (
+            validate_encoding(args.dialogue_encoding)
+            if args.dialogue_encoding is not None
+            else encoding
+        )
         if args.export:
             if len(args.paths) != 2:
                 parser.error("export requires exactly: input_path output_path")
-            export_path(Path(args.paths[0]), Path(args.paths[1]), encoding)
+            export_path(Path(args.paths[0]), Path(args.paths[1]), encoding, dialogue_encoding)
         else:
             if len(args.paths) != 3:
                 parser.error("import requires exactly: original_path json_path output_path")
-            import_path(Path(args.paths[0]), Path(args.paths[1]), Path(args.paths[2]), encoding)
+            import_path(
+                Path(args.paths[0]), Path(args.paths[1]), Path(args.paths[2]),
+                encoding, dialogue_encoding,
+            )
     except (OSError, UnicodeError, ScriptError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
