@@ -23,8 +23,10 @@ import argparse
 import codecs
 import json
 import os
+import shutil
 import struct
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -295,14 +297,20 @@ def write_script(script: Script, path: Path) -> None:
             output += arg
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(path.name + ".tmp")
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    )
+    temp_path = Path(temp_file.name)
     try:
-        temp_path.write_bytes(output)
+        with temp_file:
+            temp_file.write(output)
         os.replace(temp_path, path)
     finally:
         if temp_path.exists():
             temp_path.unlink()
-
 
 def decode_record_text(
     record: Record, encoding: str, context: str
@@ -912,6 +920,128 @@ def is_path_within(path: Path, parent: Path) -> bool:
         return False
 
 
+def validate_output_targets(
+    output_root: Path,
+    relative_paths: list[Path],
+    label: str,
+) -> list[Path]:
+    """Preflight case-insensitive paths and file/directory conflicts."""
+    root = output_root.resolve(strict=False)
+    if root.exists() and not root.is_dir():
+        raise ScriptError(f"{label} path is not a directory: {output_root}")
+
+    targets: list[Path] = []
+    seen: dict[str, Path] = {}
+
+    for relative in relative_paths:
+        if relative.is_absolute() or any(
+            part in ("", ".", "..") for part in relative.parts
+        ):
+            raise ScriptError(f"unsafe relative output path: {relative}")
+
+        target = (root / relative).resolve(strict=False)
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise ScriptError(
+                f"{label} target escapes output folder: {target}"
+            ) from exc
+
+        key = path_key(target)
+        previous = seen.get(key)
+        if previous is not None:
+            raise ScriptError(
+                f"multiple files map to the same {label} path: "
+                f"{previous} / {relative}"
+            )
+        if target.exists() and target.is_dir():
+            raise ScriptError(f"{label} target is a directory: {target}")
+
+        seen[key] = relative
+        targets.append(target)
+
+    for target in targets:
+        parent = target.parent
+        while parent != root:
+            previous = seen.get(path_key(parent))
+            if previous is not None:
+                raise ScriptError(
+                    f"{label} file/directory path conflict: "
+                    f"{previous} / {target.relative_to(root)}"
+                )
+            if parent.exists() and not parent.is_dir():
+                raise ScriptError(
+                    f"{label} parent is an existing file: {parent}"
+                )
+            parent = parent.parent
+
+    return targets
+
+
+def commit_staged_files(
+    staged_pairs: list[tuple[Path, Path]],
+    output_root: Path,
+    label: str,
+) -> None:
+    """Commit a folder batch and roll back replaced files if commit fails."""
+    if not staged_pairs:
+        return
+
+    root = output_root.resolve(strict=False)
+    relatives = [relative for _staged, relative in staged_pairs]
+    targets = validate_output_targets(root, relatives, label)
+    root.parent.mkdir(parents=True, exist_ok=True)
+
+    backup_root = Path(tempfile.mkdtemp(
+        prefix=".neko_scr_backup_", dir=root.parent
+    ))
+    backups: list[tuple[Path, Path]] = []
+    committed: list[Path] = []
+
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+
+        for index, target in enumerate(targets):
+            if target.exists():
+                backup = backup_root / f"{index:08d}.bak"
+                os.replace(target, backup)
+                backups.append((target, backup))
+
+        for (staged, _relative), target in zip(staged_pairs, targets):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, target)
+            committed.append(target)
+
+    except Exception:
+        rollback_errors: list[str] = []
+
+        for target in reversed(committed):
+            try:
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            except OSError as exc:
+                rollback_errors.append(f"remove {target}: {exc}")
+
+        for target, backup in reversed(backups):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if backup.exists():
+                    os.replace(backup, target)
+            except OSError as exc:
+                rollback_errors.append(f"restore {target}: {exc}")
+
+        if rollback_errors:
+            raise ScriptError(
+                "output commit failed and rollback was incomplete; "
+                f"backup files remain at {backup_root}: {'; '.join(rollback_errors)}"
+            )
+        shutil.rmtree(backup_root, ignore_errors=True)
+        raise
+
+    else:
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+
 def ensure_output_not_inside(
     output_path: Path, input_path: Path, label: str
 ) -> None:
@@ -932,24 +1062,31 @@ def export_file(
 ) -> None:
     if path_key(input_path) == path_key(output_path):
         raise ScriptError("JSON output path cannot overwrite the original script")
+
     script = read_script(input_path)
     items = export_items(
         script, encoding, dialogue_encoding, str(input_path)
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = output_path.with_name(output_path.name + ".tmp")
+
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+        delete=False,
+    )
+    temp_path = Path(temp_file.name)
     try:
-        temp_path.write_text(
-            json.dumps(items, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        with temp_file:
+            temp_file.write(
+                (json.dumps(items, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            )
         os.replace(temp_path, output_path)
     finally:
         if temp_path.exists():
             temp_path.unlink()
-    print(f"exported {len(items)} item(s): {input_path} -> {output_path}")
 
+    print(f"exported {len(items)} item(s): {input_path} -> {output_path}")
 
 def load_translation(path: Path) -> list[dict[str, object]]:
     try:
@@ -991,11 +1128,13 @@ def import_file(
 
 
 def iter_files(root: Path) -> list[Path]:
-    return sorted(
-        (path for path in root.rglob("*") if path.is_file()),
-        key=lambda p: p.as_posix().casefold(),
-    )
-
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ScriptError(f"symbolic links are not supported: {path}")
+        if path.is_file():
+            files.append(path)
+    return sorted(files, key=lambda p: p.as_posix().casefold())
 
 def export_path(
     input_path: Path,
@@ -1003,96 +1142,94 @@ def export_path(
     encoding: str,
     dialogue_encoding: str,
 ) -> None:
-    if input_path.is_dir():
-        ensure_output_not_inside(
-            output_path, input_path, "JSON output folder"
-        )
-        files = iter_files(input_path)
-        if not files:
-            raise ScriptError(f"no files found: {input_path}")
+    if not input_path.is_dir():
+        export_file(input_path, output_path, encoding, dialogue_encoding)
+        return
 
-        # ---------------------------------------------------------
-        # Pass 1: identify valid ADVSCRIPT2 scripts.
-        #
-        # Files without the ADVSCRIPT2 signature are ordinary
-        # resources and must not participate in output-name checks.
-        # A file with the signature but invalid internal structure
-        # is a damaged script and must stop the operation.
-        # ---------------------------------------------------------
-        scripts: list[Path] = []
+    ensure_output_not_inside(
+        output_path, input_path, "JSON output folder"
+    )
+    files = iter_files(input_path)
+    if not files:
+        raise ScriptError(f"no files found: {input_path}")
 
-        for file_path in files:
-            try:
-                read_script(file_path)
-            except ScriptError as exc:
-                if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
-                    print(
-                        f"skip non-script file: {file_path}",
-                        file=sys.stderr,
-                    )
-                    continue
-                raise
-
-            scripts.append(file_path)
-
-        if not scripts:
-            raise ScriptError(
-                f"no valid ADVSCRIPT2 files found: {input_path}"
-            )
-
-        # ---------------------------------------------------------
-        # Pass 2: preflight output names for valid scripts only.
-        #
-        # This entire check finishes before the output directory is
-        # created or any JSON file is written.
-        # ---------------------------------------------------------
-        targets: dict[str, Path] = {}
-
-        for file_path in scripts:
-            relative = file_path.relative_to(input_path)
-            target = (output_path / relative).with_suffix(".json")
-            key = path_key(target)
-
-            previous = targets.get(key)
-            if previous is not None:
-                raise ScriptError(
-                    "multiple valid ADVSCRIPT2 scripts map to the same "
-                    "JSON output: "
-                    f"{previous.relative_to(input_path)} and {relative}"
+    # Pass 1: identify valid ADVSCRIPT2 scripts. Ordinary resources are
+    # excluded; files carrying the signature but malformed internally fail.
+    scripts: list[Path] = []
+    for file_path in files:
+        try:
+            read_script(file_path)
+        except ScriptError as exc:
+            if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
+                print(
+                    f"skip non-script file: {file_path}",
+                    file=sys.stderr,
                 )
+                continue
+            raise
+        scripts.append(file_path)
 
-            targets[key] = file_path
+    if not scripts:
+        raise ScriptError(
+            f"no valid ADVSCRIPT2 files found: {input_path}"
+        )
 
-        # ---------------------------------------------------------
-        # Pass 3: all checks passed; begin exporting.
-        # ---------------------------------------------------------
-        output_path.mkdir(parents=True, exist_ok=True)
+    relatives = [
+        file_path.relative_to(input_path).with_suffix(".json")
+        for file_path in scripts
+    ]
 
-        processed = 0
-        for file_path in scripts:
-            relative = file_path.relative_to(input_path)
-            target = (output_path / relative).with_suffix(".json")
-
-            export_file(
-                file_path,
-                target,
-                encoding,
-                dialogue_encoding,
+    # Check script-origin collisions first so the diagnostic names the actual
+    # source files rather than only their shared generated JSON destination.
+    targets_by_key: dict[str, Path] = {}
+    for file_path, relative in zip(scripts, relatives):
+        target = output_path / relative
+        key = path_key(target)
+        previous = targets_by_key.get(key)
+        if previous is not None:
+            raise ScriptError(
+                "multiple valid ADVSCRIPT2 scripts map to the same JSON output: "
+                f"{previous.relative_to(input_path)} and "
+                f"{file_path.relative_to(input_path)}"
             )
-            processed += 1
+        targets_by_key[key] = file_path
 
-        print(
-            f"finished: exported {processed} valid ADVSCRIPT2 script(s)"
+    # Also check file/directory ancestor conflicts before any JSON output.
+    validate_output_targets(
+        output_path, relatives, "JSON output"
+    )
+    output_root = output_path.resolve(strict=False)
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+
+    # Parse and export every valid script into staging. The final destination
+    # is modified only after the complete batch has been generated.
+    with tempfile.TemporaryDirectory(
+        prefix=".neko_scr_export_", dir=output_root.parent
+    ) as stage_name:
+        stage_root = Path(stage_name)
+        staged_pairs: list[tuple[Path, Path]] = []
+
+        for file_path, relative in zip(scripts, relatives):
+            script = read_script(file_path)
+            items = export_items(
+                script, encoding, dialogue_encoding, str(file_path)
+            )
+            staged = stage_root / relative
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_text(
+                json.dumps(items, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            staged_pairs.append((staged, relative))
+
+        commit_staged_files(
+            staged_pairs, output_root, "JSON output"
         )
 
-    else:
-        export_file(
-            input_path,
-            output_path,
-            encoding,
-            dialogue_encoding,
-        )
-
+    print(
+        f"finished: exported {len(scripts)} valid ADVSCRIPT2 script(s)"
+    )
 
 def import_path(
     original_path: Path,
@@ -1101,108 +1238,128 @@ def import_path(
     encoding: str,
     dialogue_encoding: str,
 ) -> None:
-    if original_path.is_dir():
-        if not json_path.is_dir():
-            raise ScriptError("folder import requires a JSON folder")
+    if not original_path.is_dir():
+        import_file(
+            original_path, json_path, output_path, encoding, dialogue_encoding
+        )
+        return
 
-        ensure_output_not_inside(
-            output_path, original_path, "import output folder"
+    if not json_path.is_dir():
+        raise ScriptError("folder import requires a JSON folder")
+
+    ensure_output_not_inside(
+        output_path, original_path, "import output folder"
+    )
+
+    if is_path_within(json_path, original_path):
+        raise ScriptError(
+            "translation JSON folder must be outside the original "
+            "script folder"
         )
 
-        if is_path_within(json_path, original_path):
-            raise ScriptError(
-                "translation JSON folder must be outside the original "
-                "script folder"
-            )
+    if (
+        is_path_within(output_path, json_path)
+        or is_path_within(json_path, output_path)
+    ):
+        raise ScriptError(
+            "import output folder and translation JSON folder "
+            "must be separate"
+        )
 
-        if (
-            is_path_within(output_path, json_path)
-            or is_path_within(json_path, output_path)
-        ):
-            raise ScriptError(
-                "import output folder and translation JSON folder "
-                "must be separate"
-            )
+    files = iter_files(original_path)
+    if not files:
+        raise ScriptError(f"no files found: {original_path}")
 
-        files = iter_files(original_path)
-        if not files:
-            raise ScriptError(f"no files found: {original_path}")
+    scripts: list[Path] = []
+    non_scripts: list[Path] = []
 
-        scripts: list[Path] = []
-        non_scripts: list[Path] = []
+    for file_path in files:
+        try:
+            read_script(file_path)
+            scripts.append(file_path)
+        except ScriptError as exc:
+            if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
+                non_scripts.append(file_path)
+                continue
+            raise
 
-        for file_path in files:
-            try:
-                read_script(file_path)
-                scripts.append(file_path)
-            except ScriptError as exc:
-                if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
-                    non_scripts.append(file_path)
-                    continue
-                raise
+    # Stop before creating output or copying resources if there are no scripts.
+    if not scripts:
+        raise ScriptError(
+            f"no valid ADVSCRIPT2 files found: {original_path}"
+        )
 
-        missing_json = [
-            (
-                json_path / file_path.relative_to(original_path)
-            ).with_suffix(".json")
-            for file_path in scripts
-            if not (
-                json_path / file_path.relative_to(original_path)
-            ).with_suffix(".json").is_file()
-        ]
+    output_relatives = [
+        file_path.relative_to(original_path) for file_path in files
+    ]
+    validate_output_targets(
+        output_path, output_relatives, "import output"
+    )
 
-        if missing_json:
-            raise ScriptError(
-                f"missing translation JSON for script: {missing_json[0]}"
-            )
+    json_relatives = [
+        file_path.relative_to(original_path).with_suffix(".json")
+        for file_path in scripts
+    ]
+    validate_output_targets(
+        json_path, json_relatives, "translation JSON"
+    )
 
-        output_path.mkdir(parents=True, exist_ok=True)
+    missing_json = [
+        json_path / relative
+        for relative in json_relatives
+        if not (json_path / relative).is_file()
+    ]
+    if missing_json:
+        raise ScriptError(
+            f"missing translation JSON for script: {missing_json[0]}"
+        )
 
-        processed = 0
-        copied = 0
+    # Validate all JSON and all encoding changes in memory before staging.
+    prepared_scripts: dict[Path, Script] = {}
+    for file_path, json_relative in zip(scripts, json_relatives):
+        script = read_script(file_path)
+        source_json = json_path / json_relative
+        items = load_translation(source_json)
+        import_items(
+            script,
+            items,
+            encoding,
+            dialogue_encoding,
+            str(source_json),
+        )
+        prepared_scripts[file_path] = script
+
+    output_root = output_path.resolve(strict=False)
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+
+    # Stage imported scripts and copied resources. Existing final outputs
+    # remain unchanged until every script and JSON has passed validation.
+    with tempfile.TemporaryDirectory(
+        prefix=".neko_scr_import_", dir=output_root.parent
+    ) as stage_name:
+        stage_root = Path(stage_name)
+        staged_pairs: list[tuple[Path, Path]] = []
 
         for file_path in files:
             relative = file_path.relative_to(original_path)
-            destination = output_path / relative
+            staged = stage_root / relative
+            staged.parent.mkdir(parents=True, exist_ok=True)
 
-            if file_path in non_scripts:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(file_path.read_bytes())
-                copied += 1
-                continue
+            if file_path in prepared_scripts:
+                write_script(prepared_scripts[file_path], staged)
+            else:
+                shutil.copy2(file_path, staged)
 
-            source_json = (
-                json_path / relative
-            ).with_suffix(".json")
+            staged_pairs.append((staged, relative))
 
-            import_file(
-                file_path,
-                source_json,
-                destination,
-                encoding,
-                dialogue_encoding,
-            )
-            processed += 1
-
-        if processed == 0:
-            raise ScriptError(
-                f"no valid ADVSCRIPT2 files found: {original_path}"
-            )
-
-        print(
-            f"finished: imported {processed} script(s), "
-            f"copied {copied} non-script file(s)"
+        commit_staged_files(
+            staged_pairs, output_root, "import output"
         )
 
-    else:
-        import_file(
-            original_path,
-            json_path,
-            output_path,
-            encoding,
-            dialogue_encoding,
-        )
-
+    print(
+        f"finished: imported {len(scripts)} script(s), "
+        f"copied {len(non_scripts)} non-script file(s)"
+    )
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -1295,4 +1452,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-    

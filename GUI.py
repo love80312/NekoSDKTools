@@ -168,7 +168,6 @@ class NekoSDKToolsGUI:
         if not path.is_dir():
             raise ValueError(f"{label}不存在或不是資料夾：\n{path}")
         return path
-
     def _validate_tool(self, key: str) -> Path:
         path = self.tool_dir / TOOL_FILES[key]
         if not path.is_file():
@@ -252,6 +251,15 @@ class NekoSDKToolsGUI:
     def _append_log(self, value: str) -> None:
         self.log_text.configure(state="normal")
         self.log_text.insert("end", value)
+
+        # Bound the Tk Text widget as well as the Python-side log buffer.
+        # wrap="char" affects visual wrapping, not the logical line count.
+        max_display_lines = 5000
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > max_display_lines:
+            first_kept_line = line_count - max_display_lines + 1
+            self.log_text.delete("1.0", f"{first_kept_line}.0")
+
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
@@ -316,6 +324,7 @@ class NekoSDKToolsGUI:
                     messagebox.showerror("停止失敗", str(exc), parent=self.root)
 
     def clear_log(self) -> None:
+        self.run_log.clear()
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")

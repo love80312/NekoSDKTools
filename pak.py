@@ -32,7 +32,7 @@ import tempfile
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import BinaryIO, Iterable
 
 SIGNATURE = b"NEKOPACK"
@@ -250,23 +250,172 @@ def parse_entries(archive_path: Path, encoding: str = DEFAULT_ENCODING) -> list[
     return entries
 
 
-def safe_output_path(root: Path, entry_name: str) -> Path:
+def path_key(path: Path) -> str:
+    """Return a stable case-insensitive key for Windows-style paths."""
+    return os.path.normcase(str(path.resolve(strict=False))).casefold()
+
+
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+    "COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³",
+}
+
+
+def safe_entry_parts(entry_name: str) -> tuple[str, ...]:
+    """Validate raw archive path components before path normalization."""
     normalized = normalized_entry_name(entry_name)
-    pure = PurePosixPath(normalized)
-    if pure.is_absolute() or not pure.parts or any(part in ("", ".", "..") for part in pure.parts):
-        raise PakError(f"unsafe entry path: {entry_name!r}")
-    if any(":" in part for part in pure.parts):
+    if not normalized or normalized.startswith("/"):
         raise PakError(f"unsafe entry path: {entry_name!r}")
 
-    root_resolved = root.resolve()
-    output = root.joinpath(*pure.parts)
+    parts = normalized.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise PakError(f"unsafe entry path: {entry_name!r}")
+
+    invalid_chars = set('<>:"|?*')
+    for part in parts:
+        if (
+            any(ord(char) < 32 or char in invalid_chars for char in part)
+            or part.endswith((" ", "."))
+        ):
+            raise PakError(f"unsafe entry path: {entry_name!r}")
+        device_name = part.split(".", 1)[0].upper()
+        if device_name in WINDOWS_RESERVED_NAMES:
+            raise PakError(f"unsafe Windows device path: {entry_name!r}")
+
+    return tuple(parts)
+
+
+def safe_output_path(root: Path, entry_name: str) -> Path:
+    parts = safe_entry_parts(entry_name)
+    root_resolved = root.resolve(strict=False)
+    output = root_resolved.joinpath(*parts)
     output_resolved = output.resolve(strict=False)
     try:
         output_resolved.relative_to(root_resolved)
     except ValueError as exc:
         raise PakError(f"unsafe entry path: {entry_name!r}") from exc
-    return output
+    return output_resolved
 
+
+def preflight_unpack_paths(
+    output_dir: Path,
+    entries: list[Entry],
+    archive_path: Path,
+) -> list[tuple[Entry, Path]]:
+    """Validate every output path before creating or replacing any file."""
+    root = output_dir.resolve(strict=False)
+    if root.exists() and not root.is_dir():
+        raise PakError(f"output path is not a directory: {output_dir}")
+
+    archive_key = path_key(archive_path)
+    targets: list[tuple[Entry, Path]] = []
+    target_keys: dict[str, tuple[Entry, Path]] = {}
+
+    for entry in entries:
+        target = safe_output_path(root, entry.name)
+        key = path_key(target)
+
+        if key == archive_key:
+            raise PakError(
+                f"extraction target would overwrite the source archive: {entry.name}"
+            )
+
+        previous = target_keys.get(key)
+        if previous is not None:
+            raise PakError(
+                "multiple archive entries map to the same output path: "
+                f"{previous[0].name} / {entry.name}"
+            )
+
+        target_keys[key] = (entry, target)
+        targets.append((entry, target))
+
+    # A file entry cannot also be the parent directory of another entry.
+    for entry, target in targets:
+        parent = target.parent
+        while parent != root:
+            previous = target_keys.get(path_key(parent))
+            if previous is not None:
+                raise PakError(
+                    "archive file/directory path conflict: "
+                    f"{previous[0].name} / {entry.name}"
+                )
+            if parent.exists() and not parent.is_dir():
+                raise PakError(f"output parent is an existing file: {parent}")
+            parent = parent.parent
+
+        if target.exists() and target.is_dir():
+            raise PakError(f"output target is an existing directory: {target}")
+
+    return targets
+
+
+def commit_staged_files(
+    staged_pairs: list[tuple[Path, Path]],
+    output_dir: Path,
+) -> None:
+    """Commit staged extraction files and roll back replaced files on failure."""
+    if not staged_pairs:
+        return
+
+    root = output_dir.resolve(strict=False)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    if root.exists() and not root.is_dir():
+        raise PakError(f"output path is not a directory: {root}")
+
+    backup_root = Path(tempfile.mkdtemp(
+        prefix=".neko_unpack_backup_", dir=root.parent
+    ))
+    backups: list[tuple[Path, Path]] = []
+    committed: list[Path] = []
+
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+
+        for index, (_staged, target) in enumerate(staged_pairs):
+            target = target.resolve(strict=False)
+            if target.exists():
+                backup = backup_root / f"{index:08d}.bak"
+                os.replace(target, backup)
+                backups.append((target, backup))
+
+        for staged, target in staged_pairs:
+            target = target.resolve(strict=False)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, target)
+            committed.append(target)
+
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for target in reversed(committed):
+            try:
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            except OSError as rollback_exc:
+                rollback_errors.append(f"remove {target}: {rollback_exc}")
+
+        for target, backup in reversed(backups):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if backup.exists():
+                    os.replace(backup, target)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"restore {target}: {rollback_exc}")
+
+        if rollback_errors:
+            raise PakError(
+                "output commit failed and rollback was incomplete; "
+                f"recoverable backups remain at {backup_root}: "
+                + "; ".join(rollback_errors)
+            ) from exc
+
+        shutil.rmtree(backup_root, ignore_errors=True)
+        raise
+
+    else:
+        shutil.rmtree(backup_root, ignore_errors=True)
 
 def decrypt_zlib_stream(archive: BinaryIO, entry: Entry, output: BinaryIO) -> int:
     """Decrypt and decompress one entry, including short-payload footers.
@@ -344,45 +493,75 @@ def decrypt_zlib_stream(archive: BinaryIO, entry: Entry, output: BinaryIO) -> in
     return written
 
 
-def unpack_archive(archive_path: Path, output_dir: Path, encoding: str = DEFAULT_ENCODING) -> None:
+def unpack_archive(
+    archive_path: Path,
+    output_dir: Path,
+    encoding: str = DEFAULT_ENCODING,
+) -> None:
     if not archive_path.is_file():
         raise PakError(f"input archive not found: {archive_path}")
+
     entries = parse_entries(archive_path, encoding)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    targets = preflight_unpack_paths(output_dir, entries, archive_path)
+    root = output_dir.resolve(strict=False)
+    root.parent.mkdir(parents=True, exist_ok=True)
 
-    with archive_path.open("rb") as archive:
-        total = len(entries)
-        for index, entry in enumerate(entries, 1):
-            print(f"unpacking [{index}/{total}] {entry.name}")
-            out_path = safe_output_path(output_dir, entry.name)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = out_path.with_name(out_path.name + ".tmp")
-            try:
-                with temp_path.open("wb") as output:
+    # Decode every entry into private staging first. A damaged later payload
+    # cannot leave a partly extracted destination folder.
+    with tempfile.TemporaryDirectory(
+        prefix=".neko_unpack_stage_", dir=root.parent
+    ) as stage_name:
+        stage_root = Path(stage_name)
+        staged_pairs: list[tuple[Path, Path]] = []
+
+        with archive_path.open("rb") as archive:
+            total = len(targets)
+            for index, (entry, target) in enumerate(targets, 1):
+                print(f"unpacking [{index}/{total}] {entry.name}")
+                relative = target.relative_to(root)
+                staged = stage_root / relative
+                staged.parent.mkdir(parents=True, exist_ok=True)
+
+                with staged.open("wb") as output:
                     decrypt_zlib_stream(archive, entry, output)
-                os.replace(temp_path, out_path)
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink()
 
-    print(f"unpacked {len(entries)} file(s) to {output_dir}")
+                staged_pairs.append((staged, target))
 
+        commit_staged_files(staged_pairs, root)
+
+    print(f"unpacked {len(entries)} file(s) to {root}")
 
 def iter_source_names(source_dir: Path, encoding: str) -> list[str]:
     names: list[str] = []
+    seen: set[str] = set()
+
     for path in source_dir.rglob("*"):
         if path.is_symlink():
             raise PakError(f"symbolic links are not supported: {path}")
         if not path.is_file():
             continue
-        relative = path.relative_to(source_dir).as_posix().replace("/", "\\")
-        encoded_name(relative, encoding)
-        names.append(relative)
+
+        relative = path.relative_to(source_dir).as_posix()
+        safe_entry_parts(relative)
+        encoded_name(relative.replace("/", "\\"), encoding)
+
+        key = relative.casefold()
+        parts = key.split("/")
+        for index in range(1, len(parts)):
+            parent_key = "/".join(parts[:index])
+            if parent_key in seen:
+                raise PakError(f"source file/directory path conflict: {relative}")
+
+        if key in seen or any(existing.startswith(key + "/") for existing in seen):
+            raise PakError(f"duplicate or conflicting source path: {relative}")
+
+        seen.add(key)
+        names.append(relative.replace("/", "\\"))
+
     names.sort(key=str.casefold)
     if not names:
         raise PakError(f"no files found to pack in {source_dir}")
     return names
-
 
 def source_path_for_name(source_dir: Path, name: str) -> Path:
     path = safe_output_path(source_dir, name)
@@ -579,9 +758,18 @@ def pack_archive(
         raise PakError(
             f"NEKOPACK4S requires exactly one file; found {len(names)} files in {source_dir}"
         )
+    if output_path.exists() and output_path.is_dir():
+        raise PakError(f"output PAK path is a directory: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    temp_output = output_path.with_name(output_path.name + ".tmp")
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+        delete=False,
+    )
+    temp_output = Path(temp_file.name)
+    temp_file.close()
     try:
         with tempfile.TemporaryDirectory(prefix="neko_pak_") as temp_root:
             prepared = prepare_entries(source_dir, names, encoding, level, Path(temp_root), workers)

@@ -17,7 +17,9 @@ packed rows, matching the compact WaffleBmp layout.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from PIL import Image
 
@@ -50,6 +52,137 @@ def ensure_distinct_paths(paths: list[tuple[Path, str]]) -> None:
         seen[key] = (path, label)
 
 
+def make_temp_path(destination: Path) -> Path:
+    """Create a unique temporary file beside its final destination."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        prefix=f".{destination.name}.",
+        suffix=destination.suffix + ".tmp",
+        dir=destination.parent,
+        delete=False,
+    )
+    temporary = Path(handle.name)
+    handle.close()
+    return temporary
+
+
+def validate_target_paths(targets: list[Path]) -> None:
+    """Reject duplicate targets and file/directory ancestor conflicts."""
+    seen: dict[str, Path] = {}
+    resolved_targets: list[Path] = []
+
+    for target in targets:
+        resolved = target.resolve(strict=False)
+        key = path_key(resolved)
+        previous = seen.get(key)
+        if previous is not None:
+            raise BmpAlpError(
+                f"multiple outputs map to the same path: {previous} / {target}"
+            )
+        if resolved.exists() and resolved.is_dir():
+            raise BmpAlpError(f"output target is a directory: {resolved}")
+
+        seen[key] = resolved
+        resolved_targets.append(resolved)
+
+    for target in resolved_targets:
+        parent = target.parent
+        while parent != parent.parent:
+            if path_key(parent) in seen:
+                raise BmpAlpError(f"output file/directory path conflict: {target}")
+            if parent.exists() and not parent.is_dir():
+                raise BmpAlpError(f"output parent is not a directory: {parent}")
+            parent = parent.parent
+
+
+def preflight_batch_targets(
+    output_folder: Path,
+    relative_targets: list[Path],
+) -> list[Path]:
+    """Resolve and validate all planned outputs before batch conversion."""
+    root = output_folder.resolve(strict=False)
+    if root.exists() and not root.is_dir():
+        raise BmpAlpError(f"output path is not a folder: {output_folder}")
+
+    targets = [
+        (root / relative).resolve(strict=False)
+        for relative in relative_targets
+    ]
+    for target in targets:
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise BmpAlpError(
+                f"output target escapes output folder: {target}"
+            ) from exc
+
+    validate_target_paths(targets)
+    return targets
+
+
+def commit_staged_files(staged_pairs: list[tuple[Path, Path]]) -> None:
+    """Commit staged files and restore replaced files if a commit fails."""
+    if not staged_pairs:
+        return
+
+    targets = [target.resolve(strict=False) for _staged, target in staged_pairs]
+    validate_target_paths(targets)
+
+    # Keep backups on the same volume as the outputs so os.replace remains
+    # atomic and does not fail with a cross-device error on Windows.
+    common_parent = Path(os.path.commonpath([str(target.parent) for target in targets]))
+    common_parent.mkdir(parents=True, exist_ok=True)
+    backup_dir = Path(tempfile.mkdtemp(
+        prefix=".neko_bmp_backup_", dir=common_parent
+    ))
+
+    backups: list[tuple[Path, Path]] = []
+    committed: list[Path] = []
+
+    try:
+        for index, target in enumerate(targets):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                backup = backup_dir / f"{index:08d}.bak"
+                os.replace(target, backup)
+                backups.append((target, backup))
+
+        for (staged, _original_target), target in zip(staged_pairs, targets):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, target)
+            committed.append(target)
+
+    except Exception as exc:
+        rollback_errors: list[str] = []
+
+        for target in reversed(committed):
+            try:
+                if target.is_file() or target.is_symlink():
+                    target.unlink()
+            except OSError as rollback_exc:
+                rollback_errors.append(f"remove {target}: {rollback_exc}")
+
+        for target, backup in reversed(backups):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if backup.exists():
+                    os.replace(backup, target)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"restore {target}: {rollback_exc}")
+
+        if rollback_errors:
+            raise BmpAlpError(
+                "output commit failed and rollback was incomplete; "
+                f"recoverable backups remain at {backup_dir}: "
+                + "; ".join(rollback_errors)
+            ) from exc
+
+        shutil.rmtree(backup_dir, ignore_errors=True)
+        raise
+
+    else:
+        shutil.rmtree(backup_dir, ignore_errors=True)
+
 def ensure_output_outside_input(output_folder: Path, input_folder: Path) -> None:
     output_resolved = output_folder.resolve(strict=False)
     input_resolved = input_folder.resolve(strict=False)
@@ -79,15 +212,13 @@ def alpha_stride(width: int, height: int, alpha_size: int) -> int:
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(path.name + ".tmp")
+    temporary = make_temp_path(path)
     try:
-        temp_path.write_bytes(data)
-        os.replace(temp_path, path)
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
     finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
+        if temporary.exists():
+            temporary.unlink()
 
 def save_image(image: Image.Image, output_path: Path) -> None:
     suffix = output_path.suffix.lower()
@@ -103,21 +234,20 @@ def save_image(image: Image.Image, output_path: Path) -> None:
     }
     image_format = formats.get(suffix)
     if image_format is None:
-        raise BmpAlpError(f"unsupported output image extension: {suffix or '(none)'}")
+        raise BmpAlpError(
+            f"unsupported output image extension: {suffix or '(none)'}"
+        )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = output_path.with_name(output_path.stem + ".tmp" + output_path.suffix)
+    temporary = make_temp_path(output_path)
     try:
         save_source = image
         if image_format == "JPEG":
-            # JPEG has no alpha channel; retain RGB content and discard alpha.
             save_source = image.convert("RGB")
-        save_source.save(temp_path, format=image_format)
-        os.replace(temp_path, output_path)
+        save_source.save(temporary, format=image_format)
+        os.replace(temporary, output_path)
     finally:
-        if temp_path.exists():
-            temp_path.unlink()
-
+        if temporary.exists():
+            temporary.unlink()
 
 def combine_bmp_alp(bmp_path: Path, alp_path: Path, output_path: Path) -> None:
     ensure_distinct_paths([
@@ -158,6 +288,7 @@ def split_image(image_path: Path, bmp_path: Path, alp_path: Path) -> None:
         (bmp_path, "output BMP"),
         (alp_path, "output ALP"),
     ])
+    validate_target_paths([bmp_path, alp_path])
     if not image_path.is_file():
         raise BmpAlpError(f"image file not found: {image_path}")
 
@@ -167,18 +298,30 @@ def split_image(image_path: Path, bmp_path: Path, alp_path: Path) -> None:
     except Exception as exc:
         raise BmpAlpError(f"cannot open image {image_path}: {exc}") from exc
 
-    bmp_path.parent.mkdir(parents=True, exist_ok=True)
-    rgba.convert("RGB").save(bmp_path, format="BMP")
-    atomic_write_bytes(alp_path, rgba.getchannel("A").tobytes())
+    staged_bmp = make_temp_path(bmp_path)
+    staged_alp = make_temp_path(alp_path)
+    try:
+        rgba.convert("RGB").save(staged_bmp, format="BMP")
+        staged_alp.write_bytes(rgba.getchannel("A").tobytes())
+        commit_staged_files([
+            (staged_bmp, bmp_path),
+            (staged_alp, alp_path),
+        ])
+    finally:
+        for staged in (staged_bmp, staged_alp):
+            if staged.exists():
+                staged.unlink()
+
     print(f"created: {image_path} -> {bmp_path} + {alp_path}")
 
-
 def iter_files(root: Path, extensions: set[str]) -> list[Path]:
-    return sorted(
-        (path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in extensions),
-        key=lambda path: path.as_posix().casefold(),
-    )
-
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise BmpAlpError(f"symbolic links are not supported: {path}")
+        if path.is_file() and path.suffix.lower() in extensions:
+            files.append(path)
+    return sorted(files, key=lambda path: path.as_posix().casefold())
 
 def build_case_insensitive_file_map(root: Path, extension: str) -> dict[str, Path]:
     result: dict[str, Path] = {}
@@ -199,7 +342,6 @@ def extract_folder(input_folder: Path, output_folder: Path) -> None:
     if not bmp_files:
         raise BmpAlpError(f"no BMP files found: {input_folder}")
 
-    # Catch case-only duplicate BMP names before they map to the same PNG.
     seen_bmp: set[str] = set()
     for bmp_path in bmp_files:
         key = bmp_path.relative_to(input_folder).with_suffix("").as_posix().casefold()
@@ -208,9 +350,8 @@ def extract_folder(input_folder: Path, output_folder: Path) -> None:
         seen_bmp.add(key)
 
     alp_map = build_case_insensitive_file_map(input_folder, ".alp")
-    extracted = 0
+    matched: list[tuple[Path, Path, Path]] = []
     missing: list[Path] = []
-    failed: list[tuple[Path, str]] = []
 
     for bmp_path in bmp_files:
         relative = bmp_path.relative_to(input_folder)
@@ -218,28 +359,50 @@ def extract_folder(input_folder: Path, output_folder: Path) -> None:
         alp_path = alp_map.get(key)
         if alp_path is None:
             missing.append(bmp_path)
-            print(f"skip (matching ALP not found): {bmp_path}", file=sys.stderr)
+            print(
+                f"skip (matching ALP not found): {bmp_path}",
+                file=sys.stderr,
+            )
             continue
+        matched.append((bmp_path, alp_path, relative.with_suffix(".png")))
 
-        output_path = (output_folder / relative).with_suffix(".png")
-        try:
-            combine_bmp_alp(bmp_path, alp_path, output_path)
-            extracted += 1
-        except (OSError, BmpAlpError, ValueError) as exc:
-            failed.append((bmp_path, str(exc)))
-            print(f"error: {bmp_path}: {exc}", file=sys.stderr)
-
-    print(
-        f"extract summary: {extracted} converted, {len(missing)} missing ALP, "
-        f"{len(failed)} failed"
-    )
-    if failed:
-        raise BmpAlpError(
-            f"{len(failed)} BMP/ALP conversion(s) failed; see the error messages above"
-        )
-    if extracted == 0:
+    if not matched:
         raise BmpAlpError("no BMP/ALP pairs could be extracted")
 
+    output_root = output_folder.resolve(strict=False)
+    relative_targets = [relative for _bmp, _alp, relative in matched]
+    preflight_batch_targets(output_root, relative_targets)
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix=".neko_bmp_stage_", dir=output_root.parent
+    ) as stage_name:
+        stage_root = Path(stage_name)
+        staged_pairs: list[tuple[Path, Path]] = []
+        failed: list[tuple[Path, str]] = []
+
+        for bmp_path, alp_path, relative in matched:
+            staged = stage_root / relative
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                combine_bmp_alp(bmp_path, alp_path, staged)
+                staged_pairs.append((staged, output_root / relative))
+            except (OSError, BmpAlpError, ValueError) as exc:
+                failed.append((bmp_path, str(exc)))
+                print(f"error: {bmp_path}: {exc}", file=sys.stderr)
+
+        if failed:
+            raise BmpAlpError(
+                f"{len(failed)} BMP/ALP conversion(s) failed; "
+                "no batch outputs were committed"
+            )
+
+        commit_staged_files(staged_pairs)
+
+    print(
+        f"extract summary: {len(matched)} converted, "
+        f"{len(missing)} missing ALP, 0 failed"
+    )
 
 def create_folder(image_folder: Path, output_folder: Path) -> None:
     if not image_folder.is_dir():
@@ -250,26 +413,44 @@ def create_folder(image_folder: Path, output_folder: Path) -> None:
     if not image_files:
         raise BmpAlpError(f"no supported image files found: {image_folder}")
 
-    # Different source formats with the same relative stem would overwrite
-    # the same BMP/ALP output pair. Stop rather than silently lose an image.
     seen: set[str] = set()
-    for image_path in image_files:
-        relative = image_path.relative_to(image_folder).with_suffix("").as_posix().casefold()
-        if relative in seen:
-            raise BmpAlpError(f"multiple input images map to the same output name: {relative}")
-        seen.add(relative)
+    relative_pairs: list[tuple[Path, Path, Path]] = []
+    relative_targets: list[Path] = []
 
-    created = 0
     for image_path in image_files:
         relative = image_path.relative_to(image_folder)
-        split_image(
-            image_path,
-            (output_folder / relative).with_suffix(".bmp"),
-            (output_folder / relative).with_suffix(".alp"),
-        )
-        created += 1
-    print(f"create summary: {created} image(s) converted")
+        key = relative.with_suffix("").as_posix().casefold()
+        if key in seen:
+            raise BmpAlpError(
+                f"multiple input images map to the same output name: {key}"
+            )
+        seen.add(key)
 
+        bmp_relative = relative.with_suffix(".bmp")
+        alp_relative = relative.with_suffix(".alp")
+        relative_pairs.append((image_path, bmp_relative, alp_relative))
+        relative_targets.extend((bmp_relative, alp_relative))
+
+    output_root = output_folder.resolve(strict=False)
+    preflight_batch_targets(output_root, relative_targets)
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix=".neko_bmp_stage_", dir=output_root.parent
+    ) as stage_name:
+        stage_root = Path(stage_name)
+        staged_pairs: list[tuple[Path, Path]] = []
+
+        for image_path, bmp_relative, alp_relative in relative_pairs:
+            staged_bmp = stage_root / bmp_relative
+            staged_alp = stage_root / alp_relative
+            split_image(image_path, staged_bmp, staged_alp)
+            staged_pairs.append((staged_bmp, output_root / bmp_relative))
+            staged_pairs.append((staged_alp, output_root / alp_relative))
+
+        commit_staged_files(staged_pairs)
+
+    print(f"create summary: {len(image_files)} image(s) converted")
 
 def usage() -> str:
     return (
