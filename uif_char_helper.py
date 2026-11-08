@@ -20,9 +20,11 @@ import csv
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import tkinter as tk
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -523,13 +525,32 @@ def replace_text(value: str, mapping: dict[str, str]) -> tuple[str, int]:
 
 
 def _is_link(path: Path) -> bool:
+    """辨識符號連結及 Windows reparse point（包含 Python 3.10/3.11 的 Junction）。"""
     try:
-        if path.is_symlink():
-            return True
-        is_junction = getattr(path, "is_junction", None)
-        return bool(is_junction()) if callable(is_junction) else False
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
     except OSError:
+        # 無法安全確認時採取保守策略，不進入該路徑。
         return True
+
+    if stat.S_ISLNK(info.st_mode):
+        return True
+
+    # Path.is_junction() 是 Python 3.12 才加入；舊版 Windows Python
+    # 仍可從 lstat().st_file_attributes 判斷 FILE_ATTRIBUTE_REPARSE_POINT。
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    attributes = getattr(info, "st_file_attributes", 0)
+    if attributes & reparse_attribute:
+        return True
+
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            return bool(is_junction())
+        except OSError:
+            return True
+    return False
 
 
 def _ensure_output_location(source: Path, output: Path) -> None:
@@ -550,12 +571,58 @@ def _ensure_output_location(source: Path, output: Path) -> None:
         raise UIFHelperError(f"輸出檔案已存在，為避免覆寫而停止：{output}")
 
 
-def _process_one_file(source_file: Path, output_file: Path, encoding: str,
-                      mapping: dict[str, str]) -> tuple[int, str | None]:
+def _find_cp932_unsupported(text: str) -> dict[str, int]:
+    """統計文字中無法嚴格編碼為 CP932 的字元；不改動原文字串。"""
+    counts: dict[str, int] = {}
+    supported_cache: set[str] = set()
+    unsupported_cache: set[str] = set()
+    for character in text:
+        if character in supported_cache:
+            continue
+        if character in unsupported_cache:
+            counts[character] = counts.get(character, 0) + 1
+            continue
+        try:
+            character.encode("cp932", errors="strict")
+            supported_cache.add(character)
+        except UnicodeEncodeError:
+            unsupported_cache.add(character)
+            counts[character] = counts.get(character, 0) + 1
+    return counts
+
+
+def _json_value_text(value: Any) -> str:
+    """取得 JSON 所有字串值（不含鍵），與 char_manager 的掃描範圍一致。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_json_value_text(item) for item in value)
+    if isinstance(value, dict):
+        return "".join(_json_value_text(item) for item in value.values())
+    return ""
+
+
+def _describe_cp932_characters(counts: dict[str, int], limit: int = 12) -> str:
+    descriptions: list[str] = []
+    for character, count in sorted(counts.items(), key=lambda item: ord(item[0]))[:limit]:
+        name = unicodedata.name(character, "未命名字元")
+        descriptions.append(f"{character!r}（U+{ord(character):04X} {name}，{count} 次）")
+    remaining = len(counts) - limit
+    if remaining > 0:
+        descriptions.append(f"另有 {remaining} 種字元")
+    return "、".join(descriptions)
+
+
+def _process_one_file(
+    source_file: Path,
+    output_file: Path,
+    encoding: str,
+    mapping: dict[str, str],
+) -> tuple[int, str | None, dict[str, int]]:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     if source_file.suffix.lower() not in TEXT_EXTENSIONS:
         shutil.copy2(source_file, output_file)
-        return 0, None
+        return 0, None, {}
     try:
         raw = source_file.read_bytes()
         is_json = source_file.suffix.lower() == ".json"
@@ -579,20 +646,26 @@ def _process_one_file(source_file: Path, output_file: Path, encoding: str,
                 encoded = codecs.BOM_UTF8 + encoded
         else:
             converted, count = replace_text(text, mapping)
-            encoded = converted.encode("utf-8" if codecs.lookup(encoding).name == "utf-8-sig" else encoding)
+            output_encoding = "utf-8" if codecs.lookup(encoding).name == "utf-8-sig" else encoding
+            encoded = converted.encode(output_encoding)
             if codecs.lookup(encoding).name == "utf-8-sig" and has_bom:
                 encoded = codecs.BOM_UTF8 + encoded
 
+        if is_json:
+            unsupported_text = _json_value_text(json.loads(converted))
+        else:
+            unsupported_text = converted
+        unsupported = _find_cp932_unsupported(unsupported_text)
         output_file.write_bytes(encoded)
         shutil.copystat(source_file, output_file, follow_symlinks=False)
-        return count, None
+        return count, None, unsupported
     except (OSError, UnicodeError, LookupError, UIFHelperError) as exc:
         # 失敗檔仍複製原始內容，避免輸出資料夾遺失該資源；報告會明確標示未替換。
         try:
             shutil.copy2(source_file, output_file)
         except OSError as copy_exc:
-            return 0, f"{source_file}：讀取／替換失敗（{exc}），複製也失敗（{copy_exc}）"
-        return 0, f"{source_file}：未替換，已原樣複製。原因：{exc}"
+            return 0, f"{source_file}：讀取／替換失敗（{exc}），複製也失敗（{copy_exc}）", {}
+        return 0, f"{source_file}：未替換，已原樣複製。原因：{exc}", {}
 
 
 def replace_translation_files(
@@ -602,10 +675,14 @@ def replace_translation_files(
     encoding: str = "utf-8-sig",
 ) -> dict[str, Any]:
     """將翻譯檔另存至新位置；非文字檔原樣複製，不追蹤連結。"""
-    source_root = Path(source_root).expanduser().resolve()
-    output_root = Path(output_root).expanduser().resolve()
+    source_root = Path(source_root).expanduser().absolute()
+    output_root = Path(output_root).expanduser().absolute()
     if not source_root.exists():
         raise UIFHelperError(f"翻譯來源不存在：{source_root}")
+    if _is_link(source_root):
+        raise UIFHelperError(f"翻譯來源本身是符號連結或 Junction，為避免追蹤路徑而停止：{source_root}")
+    source_root = source_root.resolve()
+    output_root = output_root.resolve()
     try:
         encoding = codecs.lookup(encoding).name
     except LookupError as exc:
@@ -618,8 +695,15 @@ def replace_translation_files(
     if source_root.is_file():
         output_file = output_root / source_root.name if output_root.exists() and output_root.is_dir() else output_root
         _ensure_output_location(source_root, output_file)
-        count, error = _process_one_file(source_root, output_file, encoding, reverse)
+        count, error, unsupported = _process_one_file(source_root, output_file, encoding, reverse)
         errors = [error] if error else []
+        cp932_warnings = []
+        if unsupported:
+            cp932_warnings.append(
+                f"{source_root}：輸出文字仍含 CP932 無法編碼字元："
+                f"{_describe_cp932_characters(unsupported)}。檔案仍依指定編碼輸出；"
+                "請回到字元管理報表處理這些字元。"
+            )
         files_total = 1
         files_changed = 1 if count else 0
         output_result = output_file
@@ -631,6 +715,8 @@ def replace_translation_files(
         files_total = 0
         files_changed = 0
         total_replacements = 0
+        cp932_unsupported: dict[str, int] = {}
+        cp932_warnings: list[str] = []
 
         def walk_error(exc: OSError) -> None:
             errors.append(f"無法列舉資料夾：{exc}")
@@ -653,17 +739,27 @@ def replace_translation_files(
                     errors.append(f"跳過檔案連結／Junction：{source_file}")
                     continue
                 files_total += 1
-                count, error = _process_one_file(source_file, output_file, encoding, reverse)
+                count, error, unsupported = _process_one_file(source_file, output_file, encoding, reverse)
                 total_replacements += count
                 if count:
                     files_changed += 1
                 if error:
                     errors.append(error)
+                if unsupported:
+                    for character, amount in unsupported.items():
+                        cp932_unsupported[character] = cp932_unsupported.get(character, 0) + amount
+                    cp932_warnings.append(
+                        f"{source_file}：輸出文字仍含 CP932 無法編碼字元："
+                        f"{_describe_cp932_characters(unsupported)}。檔案仍依指定編碼輸出；"
+                        "請回到字元管理報表處理這些字元。"
+                    )
         return {
             "files_total": files_total,
             "files_changed": files_changed,
             "replacements": total_replacements,
             "errors": errors,
+            "warnings": cp932_warnings,
+            "cp932_unsupported": cp932_unsupported,
             "ambiguous_targets": ambiguous,
             "output_root": output_result,
         }
@@ -673,8 +769,10 @@ def replace_translation_files(
         "files_changed": files_changed,
         "replacements": count,
         "errors": errors,
+        "warnings": cp932_warnings,
+        "cp932_unsupported": unsupported,
         "ambiguous_targets": ambiguous,
-        "output_root": output_root,
+        "output_root": output_result,
     }
 
 
@@ -693,6 +791,32 @@ class UIFCharHelperApp(ttk.Frame):
         self.encoding_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="請選擇遊戲內的 uif_config.json 與字元管理報表資料夾。")
         self._build_ui()
+        self.uif_var.trace_add("write", self._invalidate_context)
+        self.report_var.trace_add("write", self._invalidate_context)
+
+    def _invalidate_context(self, *_args: Any) -> None:
+        """UIF 或報表路徑變更時，立即清除舊載入資料。"""
+        if self.context is None:
+            return
+        self.context = None
+        self.new_pairs = []
+        self._refresh()
+        self.status_var.set("輸入路徑已變更，請重新讀取 UIF 與報表。")
+
+    def _require_current_context(self) -> HelperContext:
+        if self.context is None:
+            raise UIFHelperError("尚未讀取 UIF 與報表；請先按「讀取設定與報表」。")
+        try:
+            current_uif = Path(self.uif_var.get()).expanduser().resolve()
+            current_report = Path(self.report_var.get()).expanduser().resolve()
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise UIFHelperError(f"目前輸入路徑無效，請重新讀取：{exc}") from exc
+        if current_uif != self.context.uif_path or current_report != self.context.report_root:
+            self.context = None
+            self.new_pairs = []
+            self._refresh()
+            raise UIFHelperError("UIF 或報表路徑已與目前載入資料不同，請先重新讀取。")
+        return self.context
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -788,16 +912,23 @@ class UIFCharHelperApp(ttk.Frame):
         self.summary.configure(state="disabled")
 
     def _load(self) -> None:
+        # 無論成功或失敗，都不可沿用先前遊戲的資料與配對。
+        self.context = None
+        self.new_pairs = []
+        self._refresh()
         try:
             if not self.uif_var.get().strip() or not self.report_var.get().strip():
                 raise UIFHelperError("請先選擇遊戲內 UIF 與報表資料夾。")
             context = load_context(Path(self.uif_var.get()), Path(self.report_var.get()))
             self.context = context
-            self.new_pairs = []
             self.translation_var.set(str(context.translation_root or ""))
             self._refresh()
             self.status_var.set("已讀取外部 UIF 及本次掃描報表。")
-        except (UIFHelperError, OSError) as exc:
+        except (UIFHelperError, OSError, RuntimeError, ValueError) as exc:
+            self.context = None
+            self.new_pairs = []
+            self._refresh()
+            self.status_var.set("讀取失敗；目前沒有可使用的載入資料。")
             messagebox.showerror("讀取失敗", str(exc), parent=self)
 
     def _auto(self) -> None:
@@ -805,7 +936,8 @@ class UIFCharHelperApp(ttk.Frame):
             self._load()
             if self.context is None:
                 return
-        self.new_pairs = auto_pair(self.context)
+        context = self._require_current_context()
+        self.new_pairs = auto_pair(context)
         self._refresh()
         missing = max(0, len(self.context.target_characters) - len(self.new_pairs))
         self.status_var.set(
@@ -828,6 +960,8 @@ class UIFCharHelperApp(ttk.Frame):
         for item in self.pair_tree.get_children():
             self.pair_tree.delete(item)
         if self.context is None:
+            self._set_summary("尚未載入 UIF 與報表。")
+            self.output_text.delete("1.0", "end")
             return
         for index, pair in enumerate(self.new_pairs):
             self.pair_tree.insert("", "end", iid=f"n{index}", text=pair.source, values=(pair.target, "新增"))
@@ -863,6 +997,7 @@ class UIFCharHelperApp(ttk.Frame):
 
     def _save_mapping(self) -> None:
         try:
+            self._require_current_context()
             pairs = self._all_pairs()
             value = filedialog.asksaveasfilename(
                 title="匯出完整 UIF 兩行映射", initialfile="uif_replacement_mapping.txt",
@@ -877,6 +1012,7 @@ class UIFCharHelperApp(ttk.Frame):
 
     def _copy_mapping(self) -> None:
         try:
+            self._require_current_context()
             payload = make_two_line_text(self._all_pairs())
             self.clipboard_clear()
             self.clipboard_append(payload.rstrip("\n"))
@@ -887,12 +1023,13 @@ class UIFCharHelperApp(ttk.Frame):
 
     def _replace(self) -> None:
         try:
+            context = self._require_current_context()
             pairs = self._all_pairs()
             translation_text = self.translation_var.get().strip().strip('"')
             output_text = self.output_var.get().strip().strip('"')
             if not translation_text or not output_text:
                 raise UIFHelperError("請指定翻譯來源資料夾及替換後輸出資料夾。")
-            encoding = self.encoding_var.get().strip() or self.context.text_encoding
+            encoding = self.encoding_var.get().strip() or context.text_encoding
             result = replace_translation_files(
                 Path(translation_text), Path(output_text), pairs, encoding
             )
@@ -904,8 +1041,16 @@ class UIFCharHelperApp(ttk.Frame):
             )
             if result["ambiguous_targets"]:
                 message += "\n\n以下目標字在 UIF 有多個來源，替換時採用第一個來源：\n" + "、".join(result["ambiguous_targets"])
+            if result.get("cp932_unsupported"):
+                unsupported_total = sum(result["cp932_unsupported"].values())
+                message += (
+                    f"\n\nCP932 無法編碼的殘留字元：{len(result['cp932_unsupported'])} 種，"
+                    f"共 {unsupported_total} 次。\n"
+                    + "\n".join(result.get("warnings", [])[:20])
+                )
             if result["errors"]:
                 message += "\n\n未完整處理的項目：\n" + "\n".join(result["errors"][:30])
+            if result["errors"] or result.get("warnings"):
                 messagebox.showwarning("替換完成，但有警告", message, parent=self)
             else:
                 messagebox.showinfo("替換完成", message, parent=self)
@@ -951,8 +1096,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         context = load_context(Path(args.uif), Path(args.report))
         added = auto_pair(context) if args.auto_pair or args.export_two_line or args.translations else []
-        pairs = combine_pairs(context.existing_pairs, added)
-        print(f"既有映射：{len(context.existing_pairs)} 組")
+        pairs = combine_pairs(context.existing_pairs + context.work_pairs, added)
+        print(f"UIF 既有映射：{len(context.existing_pairs)} 組")
+        print(f"char_manager 人工映射：{len(context.work_pairs)} 組")
         print(f"本次待替換：{len(context.target_characters)} 字")
         print(f"本次新增：{len(added)} 組")
         print(f"未配對：{max(0, len(context.target_characters) - len(added))} 字")
@@ -972,6 +1118,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"有替換的檔案：{result['files_changed']}")
             print(f"替換字元總數：{result['replacements']}")
             print(f"輸出位置：{result['output_root']}")
+            if result.get("cp932_unsupported"):
+                unsupported = result["cp932_unsupported"]
+                print(
+                    f"CP932 無法編碼的殘留字元：{len(unsupported)} 種，"
+                    f"共 {sum(unsupported.values())} 次"
+                )
+            for warning in result.get("warnings", []):
+                print("CP932 警告：" + warning, file=sys.stderr)
             for error in result["errors"]:
                 print("警告：" + error, file=sys.stderr)
         return 0

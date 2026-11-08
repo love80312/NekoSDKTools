@@ -1,7 +1,12 @@
 import csv
 import json
+import stat
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 import uif_char_helper as helper
@@ -140,6 +145,121 @@ class UIFCharHelperTests(unittest.TestCase):
         output = source / "out"
         with self.assertRaises(helper.UIFHelperError):
             helper.replace_translation_files(source, output, [helper.MappingPair("夬", "婭")])
+
+
+    def test_cli_export_includes_char_manager_manual_pairs(self):
+        self.write_uif(source="夬", target="婭")
+        self.write_report(missing="婭伙妮", candidates=("夬", "亜", "鷭", "豸"))
+        with (self.report / "mapping_pairs.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["來源字元", "目標字元", "來源 Unicode", "目標 Unicode"])
+            writer.writerow(["亜", "妮", "U+4E9C", "U+59AE"])
+
+        output = self.root / "cli_mapping.txt"
+        with redirect_stdout(StringIO()):
+            exit_code = helper.main([
+                "--no-gui", "--uif", str(self.uif), "--report", str(self.report),
+                "--export-two-line", str(output),
+            ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(output.read_text(encoding="utf-8"), "夬亜鷭\n婭妮伙\n")
+
+    def test_cp932_residual_characters_are_reported_without_reencoding_utf8(self):
+        self.write_uif(source="夬", target="婭")
+        self.write_report(missing="婭", candidates=("叺", "鷭"))
+        translations = self.root / "translations"
+        translations.mkdir()
+        (translations / "dialog.txt").write_text("婭😀", encoding="utf-8")
+        output = self.root / "output"
+
+        result = helper.replace_translation_files(
+            translations, output, [helper.MappingPair("夬", "婭", True)], "utf-8"
+        )
+
+        self.assertEqual((output / "dialog.txt").read_text(encoding="utf-8"), "夬😀")
+        self.assertEqual(result["cp932_unsupported"], {"😀": 1})
+        self.assertEqual(len(result["warnings"]), 1)
+        self.assertIn("U+1F600", result["warnings"][0])
+        self.assertEqual(result["errors"], [])
+
+    def test_windows_reparse_point_fallback_detects_junction_on_old_python(self):
+        fake_stat = SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x0400)
+        with mock.patch.object(Path, "lstat", return_value=fake_stat):
+            self.assertTrue(helper._is_link(Path("legacy-junction")))
+
+    def test_source_root_link_is_rejected(self):
+        source = self.root / "linked_translations"
+        source.mkdir()
+        output = self.root / "output"
+        with mock.patch.object(helper, "_is_link", side_effect=lambda path: Path(path) == source):
+            with self.assertRaisesRegex(helper.UIFHelperError, "翻譯來源本身"):
+                helper.replace_translation_files(
+                    source, output, [helper.MappingPair("夬", "婭")], "utf-8"
+                )
+
+    def test_require_current_context_rejects_changed_paths_and_clears_state(self):
+        context = helper.HelperContext(
+            uif_path=self.uif.resolve(), report_root=self.report.resolve(),
+            translation_root=None, text_encoding="utf-8", substitution_enabled=True,
+            repeat_characters=[], existing_pairs=[], work_pairs=[], target_characters=[],
+            already_mapped_targets=[], target_counts={}, candidate_characters=[],
+            metadata={}, warnings=[],
+        )
+        fake = SimpleNamespace(
+            context=context,
+            new_pairs=[helper.MappingPair("夬", "婭")],
+            uif_var=SimpleNamespace(get=lambda: str(self.uif)),
+            report_var=SimpleNamespace(get=lambda: str(self.root / "other_report")),
+            _refresh=lambda: None,
+        )
+        with self.assertRaisesRegex(helper.UIFHelperError, "路徑已與目前載入資料不同"):
+            helper.UIFCharHelperApp._require_current_context(fake)
+        self.assertIsNone(fake.context)
+        self.assertEqual(fake.new_pairs, [])
+
+    def test_load_failure_does_not_keep_previous_context(self):
+        context = object()
+        fake = SimpleNamespace(
+            context=context,
+            new_pairs=[helper.MappingPair("夬", "婭")],
+            uif_var=SimpleNamespace(get=lambda: str(self.uif)),
+            report_var=SimpleNamespace(get=lambda: str(self.report)),
+            status_var=SimpleNamespace(set=lambda _value: None),
+            _refresh=lambda: None,
+        )
+        with mock.patch.object(helper, "load_context", side_effect=helper.UIFHelperError("bad report")), \
+             mock.patch.object(helper.messagebox, "showerror"):
+            helper.UIFCharHelperApp._load(fake)
+        self.assertIsNone(fake.context)
+        self.assertEqual(fake.new_pairs, [])
+
+
+    def test_json_cp932_check_scans_values_but_not_keys_or_escaped_literals(self):
+        self.write_uif(source="夬", target="婭")
+        self.write_report(missing="婭", candidates=("叺", "鷭"))
+        translations = self.root / "translations"
+        translations.mkdir()
+        # emoji 放在鍵與值；值使用 JSON escape，不能只掃描輸出檔的原始文字。
+        (translations / "dialog.json").write_text(
+            r'{"😀": "婭\ud83d\ude00", "message": "婭"}', encoding="utf-8"
+        )
+        result = helper.replace_translation_files(
+            translations, self.root / "output", [helper.MappingPair("夬", "婭", True)], "utf-8"
+        )
+        self.assertEqual(result["cp932_unsupported"], {"😀": 1})
+
+
+    def test_cp932_unsupported_counts_are_aggregated_across_files(self):
+        translations = self.root / "translations"
+        translations.mkdir()
+        (translations / "a.txt").write_text("😀😀", encoding="utf-8")
+        (translations / "b.txt").write_text("😁😀", encoding="utf-8")
+        result = helper.replace_translation_files(
+            translations, self.root / "output", [helper.MappingPair("夬", "婭")], "utf-8"
+        )
+        self.assertEqual(result["cp932_unsupported"], {"😀": 3, "😁": 1})
+        self.assertEqual(len(result["warnings"]), 2)
 
 
 if __name__ == "__main__":

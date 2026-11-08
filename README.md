@@ -1,6 +1,6 @@
 # NekoSDKTools（個人優化版）
 
-用於 NekoSDK／Waffle 遊戲資源的個人工具組，包含 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本、BMP+ALP 圖像，以及 CP932 字元統計與替代字元管理。
+用於 NekoSDK／Waffle 遊戲資源的個人工具組，包含 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本、BMP+ALP 圖像，以及 CP932 字元統計、替代字元管理與獨立 UIF 輔助工具。
 
 > 本專案不是通用的 PAK／TXT 解包工具。只有符合對應格式的檔案才能使用相關功能。修改後資源仍須在實際遊戲中測試。
 
@@ -13,17 +13,19 @@
 | `scr.py` | 解析 NEKOSDK_ADVSCRIPT2，將可辨識的對話／選項匯出為 UTF-8 JSON，再匯入修改內容 |
 | `bmp_alp.py` | BMP+ALP 與一般圖片之間的合併／拆分工具 |
 | `char_manager.py` | CP932 字元統計、候選排除、映射工作區及兩行替換字串匯出 |
+| `uif_char_helper.py` | 獨立讀取遊戲外部 UIF、合併既有／人工映射、輸出兩行字串及另存翻譯文件替換結果 |
 | `tool/常用字.txt` | 使用者自訂的常用字排除清單 |
 | `tool/char_manager.json` | 字元管理設定、人工排除及候選排除開關 |
 | `tool/char_candidate_exclusions.json` | 中文／日文標點、常用符號及自訂排除字元 |
 | `char_manager_README.md` | 字元管理工具的詳細操作、排除規則及命令列說明 |
+| `README_uif_char_helper.md` | UIF 輔助工具的詳細操作及命令列說明 |
 | `requirements.txt` | 圖像轉換工具的 Pillow 依賴 |
 
 ## 環境需求與啟動
 
 - Python 3.10 以上版本。
 - 使用圖形介面需要 Tkinter；Windows 版 Python 安裝時需包含 Tcl/Tk。
-- `pak.py`、`scr.py`、`char_manager.py` 使用 Python 標準函式庫。
+- `pak.py`、`scr.py`、`char_manager.py`、`uif_char_helper.py` 使用 Python 標準函式庫。
 - `bmp_alp.py` 需要 Pillow 10.0 以上版本。
 
 安裝圖像工具依賴：
@@ -32,13 +34,13 @@
 py -3 -m pip install -r requirements.txt
 ```
 
-啟動圖形介面：
+啟動整合圖形介面：
 
 ```bat
 py -3 GUI.py
 ```
 
-`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` 請放在同一個資料夾。字元管理功能直接由 `GUI.py` 載入 `char_manager.py`，不需要另外啟動第二套 GUI。
+`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` 請放在同一個資料夾。字元管理功能直接由 `GUI.py` 載入 `char_manager.py`，不需要另外啟動第二套 GUI。`uif_char_helper.py` 是獨立工具，不會由 `GUI.py` 自動載入。
 
 ---
 
@@ -315,17 +317,86 @@ py -3 char_manager.py scan --translations "D:\Game\translation_json" --source "D
 
 ---
 
-## 5. 專案檔案與清理
+## 5. UIF 字元配對與翻譯文件替換
+
+`uif_char_helper.py` 是獨立工具，不會由 `GUI.py` 自動載入，也不會匯入 `char_manager.py`。其用途是將字元管理器輸出的人工映射、遊戲現有 UIF 映射及本次自動配對整合，產生可自行貼入 UIF 的完整兩行字串；另外也能將翻譯文件中的目標字替換成對應來源字，另存至新資料夾。
+
+### 5.1 啟動與讀取
+
+啟動獨立 GUI：
+
+```bat
+py -3 uif_char_helper.py
+```
+
+GUI 中選擇兩個輸入：
+
+1. 遊戲資料夾內實際使用的 `uif_config.json`，不是專案的 `tool/uif_config.json`。
+2. `char_manager.py` 產生的 `*_char_report` 報表資料夾。
+
+按「讀取設定與報表」後，工具會保留 UIF 既有來源／目標映射順序，接著讀取報表的 `mapping_pairs.csv` 人工配對，再依 `unmapped_characters.txt` 與 `safe_candidate_glyphs.csv` 建立新增配對。CLI 與 GUI 使用相同合併順序，人工配對不會因為使用命令列而遺失。
+
+只要翻譯掃描不完整，或指定的原始腳本掃描不完整，就會停止載入並要求重新掃描。切換 UIF 或報表路徑後，必須重新讀取；讀取失敗時不會保留前一次遊戲的配對資料。
+
+### 5.2 匯出 UIF 兩行字串
+
+按「自動一對一配對」後，可使用「複製完整兩行」或「匯出完整兩行字串」。輸出內容只有兩行：
+
+```text
+source_characters 的完整來源字串
+target_characters 的完整目標字串
+```
+
+第一行順序為 UIF 既有來源字、char_manager 人工映射來源字、本次新增來源字；第二行相同位置放置其目標字。請自行將兩行分別貼入遊戲的 `source_characters` 與 `target_characters`。
+
+工具只輸出字串，不會修改、覆寫或備份原始 `uif_config.json`。既有 UIF 目標重複時，匯出仍保留原順序及內容；反向替換無法判斷重複目標原本對應哪個來源，因此替換時使用第一個來源並提出警告。`repeat` 清單不併入兩行映射。
+
+### 5.3 翻譯文件替換
+
+GUI 的「開始替換並另存」會將完整映射反向套用，把翻譯文件中的目標字換成來源字，輸出到另一個資料夾。輸出位置不可與來源相同、不可位於來源資料夾內，也不可使用非空資料夾；原始檔不會被覆寫。
+
+- JSON：只替換字串值，不修改鍵；保留原始縮排、空白及其他 JSON 格式，固定以 UTF-8 處理。
+- 其他支援文字格式：使用 `scan_metadata.json` 的 `translation_text_encoding`，或由 GUI／CLI 指定編碼。
+- 非文字檔：原樣複製。
+- 讀取、解碼或 JSON 格式錯誤：該檔原樣複製並列出警告。
+- 輸出完成後，會檢查文字值中仍無法以 CP932 編碼的字元，列出字元、Unicode 編碼及次數。
+
+**CP932 檢查只會提出警告，不會強制把 UTF-8 或其他翻譯檔重新編碼為 CP932。** 尚未配對的字元仍會留在輸出文件中，請依警告回到字元管理報表補配或人工處理。JSON 的 CP932 檢查只掃描字串值，不掃描鍵。
+
+處理翻譯資料夾時，工具會跳過子資料夾中的符號連結、檔案連結及 Windows Junction；若指定的來源根目錄本身是連結或 Junction，會停止處理，以避免追蹤到其他資料位置。
+
+### 5.4 命令列
+
+自動配對並匯出完整兩行：
+
+```bat
+py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\Translation_char_report" --auto-pair --export-two-line "D:\Game\uif_mapping.txt"
+```
+
+自動配對並替換翻譯資料夾：
+
+```bat
+py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\Translation_char_report" --auto-pair --translations "D:\Translation" --output "D:\Translation_replaced"
+```
+
+若需要覆寫一般文字檔編碼，可加入 `--encoding cp932`、`--encoding gbk` 或其他 Python 支援的編碼名稱。JSON 仍固定以 UTF-8 處理。CLI 匯出與替換均會合併 UIF 既有映射及報表中的人工配對。
+
+詳細說明及其他範例請參閱 `README_uif_char_helper.md`。
+
+---
+
+## 6. 專案檔案與清理
 
 | 檔案／資料夾 | 判定 | 說明 |
 |---|---|---|
 | `GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` | 必要 | 各主功能程式 |
-| `char_manager_README.md` | 建議保留 | 字元管理詳細操作文件 |
+| `uif_char_helper.py` | 獨立工具 | 需要 UIF 映射整理或翻譯文件替換時使用 |
+| `char_manager_README.md`、`README_uif_char_helper.md` | 建議保留 | 兩個字元工具的詳細操作文件 |
 | `tool/常用字.txt` | 必要 | 使用者自訂的常用字清單 |
 | `tool/char_manager.json` | 建議保留 | 人工排除及編碼設定 |
 | `tool/char_candidate_exclusions.json` | 必要 | 標點、符號及自訂排除清單 |
 | `requirements.txt` | 建議保留 | Pillow 依賴 |
-| `tool/uif_config.json` | 與字元管理器分離 | 字元管理器不會讀取或修改此檔 |
+| `tool/uif_config.json` | 與字元管理器分離 | `char_manager.py` 與 `uif_char_helper.py` 都不會把它當成遊戲實際使用的 UIF 讀取 |
 | `mapping_draft.json`、`char_manager_last_work.json` | 工作狀態 | 可由 GUI 續作；分享前請檢查本機路徑 |
 
 `tool/常用字.txt` 是使用者資料，更新程式時請保留原檔內容，不要以其他字表覆蓋。
