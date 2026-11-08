@@ -102,6 +102,20 @@ class MixedEncodingImportTests(unittest.TestCase):
             "[テキスト表示] Bob\nTranslated",
         )
 
+    def test_load_translation_reports_non_object_item_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "invalid_item.json"
+            path.write_text(
+                '[{"message": "第一句"}, null, {"message": "第三句"}]',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                scr.ScriptError,
+                r"JSON item 1 .*must be an object; got NoneType",
+            ):
+                scr.load_translation(path)
+
     def test_folder_import_reports_all_json_failures_without_partial_output(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -163,8 +177,8 @@ class MixedEncodingImportTests(unittest.TestCase):
             self.assertIn("invalid JSON in", log)
 
             # 缺少 JSON 的項目也要列出。
-            self.assertIn("d_missing.txt", log)
-            self.assertIn("d_missing.json", log)
+            self.assertIn("d_missing_json.txt", log)
+            self.assertIn("d_missing_json.json", log)
 
             # 批次驗證失敗，不得提交任何部分匯入結果。
             self.assertTrue(sentinel.is_file())
