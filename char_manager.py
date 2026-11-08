@@ -1167,6 +1167,64 @@ class CharacterManagerFrame(ttk.Frame):
         )
         help_label.grid(row=3, column=0, sticky="w", padx=8, pady=(0, 3))
 
+        # 大型字形預覽：目標字與 CP932 來源字分開顯示。
+        preview = ttk.Frame(self)
+        preview.grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 4))
+        preview.columnconfigure(0, weight=1)
+        preview.columnconfigure(1, weight=1)
+
+        target_preview_box = ttk.LabelFrame(
+            preview,
+            text="目標中文字形預覽",
+        )
+        target_preview_box.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 4),
+        )
+
+        source_preview_box = ttk.LabelFrame(
+            preview,
+            text="CP932 來源字形預覽",
+        )
+        source_preview_box.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=(4, 0),
+        )
+
+        self.target_preview_var = tk.StringVar(value="尚未選取")
+        self.source_preview_var = tk.StringVar(value="尚未選取")
+        preview_font = ("Microsoft JhengHei UI", 34)
+
+        self.target_preview_label = ttk.Label(
+            target_preview_box,
+            textvariable=self.target_preview_var,
+            font=preview_font,
+            anchor="center",
+        )
+        self.target_preview_label.pack(
+            fill="both",
+            expand=True,
+            padx=8,
+            pady=(2, 5),
+        )
+
+        self.source_preview_label = ttk.Label(
+            source_preview_box,
+            textvariable=self.source_preview_var,
+            font=preview_font,
+            anchor="center",
+        )
+        self.source_preview_label.pack(
+            fill="both",
+            expand=True,
+            padx=8,
+            pady=(2, 5),
+        )
+
         panes = ttk.Panedwindow(self, orient="horizontal")
         panes.grid(row=5, column=0, sticky="nsew", padx=5, pady=4)
         target_box = ttk.LabelFrame(panes, text="待替換目標字元（CP932 無法編碼）")
@@ -1237,8 +1295,107 @@ class CharacterManagerFrame(ttk.Frame):
         mapping_scroll.grid(row=0, column=1, sticky="ns")
         self.mapping_tree.configure(yscrollcommand=mapping_scroll.set)
 
+        # 任一清單選取變更時，同步更新對應的大型字形預覽。
+        self.target_tree.bind(
+            "<<TreeviewSelect>>",
+            self._update_previews,
+            add="+",
+        )
+        self.candidate_tree.bind(
+            "<<TreeviewSelect>>",
+            self._update_previews,
+            add="+",
+        )
+        self.mapping_tree.bind(
+            "<<TreeviewSelect>>",
+            self._update_previews,
+            add="+",
+        )
+
+        # 表格維持一般字級；只有上方預覽區使用 34 pt。
+        style = ttk.Style(self)
+        style.configure(
+            "Treeview",
+            font=("Microsoft JhengHei UI", 10),
+            rowheight=25,
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=("Microsoft JhengHei UI", 10, "bold"),
+        )
+
         self.summary_var = tk.StringVar(value="映射尚未建立。")
         ttk.Label(self, textvariable=self.summary_var).grid(row=8, column=0, sticky="w", padx=8, pady=4)
+        self._update_previews()
+
+    @staticmethod
+    def _selected_tree_character(tree: ttk.Treeview, prefix: str) -> str | None:
+        """從 Treeview 的項目 ID 取回單一 Unicode 字元。"""
+        try:
+            selected = tree.selection()
+            if not selected:
+                return None
+            item_id = str(selected[0])
+            if not item_id.startswith(prefix):
+                return None
+            return chr(int(item_id[len(prefix):]))
+        except (ValueError, IndexError, tk.TclError):
+            return None
+
+    def _update_previews(self, event: Any = None) -> None:
+        """依觸發事件更新目標字、來源字，或整組映射預覽。"""
+        widget = getattr(event, "widget", None) if event is not None else None
+
+        # 更新單一清單時，只改動該清單對應的預覽，避免其他清單
+        # 尚存的選取狀態蓋掉剛選取的字元。
+        if widget is self.target_tree:
+            target = self._selected_tree_character(self.target_tree, "t")
+            self.target_preview_var.set(target or "尚未選取")
+            return
+
+        if widget is self.candidate_tree:
+            source = self._selected_tree_character(self.candidate_tree, "c")
+            self.source_preview_var.set(source or "尚未選取")
+            return
+
+        if widget is self.mapping_tree:
+            source = "尚未選取"
+            target = "尚未選取"
+            try:
+                selected = self.mapping_tree.selection()
+                if selected:
+                    item = self.mapping_tree.item(selected[0])
+                    source_value = item.get("text", "")
+                    values = item.get("values", ())
+                    if isinstance(source_value, str) and len(source_value) == 1:
+                        source = source_value
+                    if values and isinstance(values[0], str) and len(values[0]) == 1:
+                        target = values[0]
+            except (IndexError, TypeError, tk.TclError):
+                pass
+            self.source_preview_var.set(source)
+            self.target_preview_var.set(target)
+            return
+
+        # 初次建立介面或清單重整後，依現有選取狀態完整同步兩個預覽。
+        target = self._selected_tree_character(self.target_tree, "t") or "尚未選取"
+        source = self._selected_tree_character(self.candidate_tree, "c") or "尚未選取"
+
+        try:
+            selected = self.mapping_tree.selection()
+            if selected:
+                item = self.mapping_tree.item(selected[0])
+                source_value = item.get("text", "")
+                values = item.get("values", ())
+                if isinstance(source_value, str) and len(source_value) == 1:
+                    source = source_value
+                if values and isinstance(values[0], str) and len(values[0]) == 1:
+                    target = values[0]
+        except (IndexError, TypeError, tk.TclError):
+            pass
+
+        self.target_preview_var.set(target)
+        self.source_preview_var.set(source)
 
     def _pick_translation(self) -> None:
         value = filedialog.askdirectory(title="選擇翻譯文件資料夾", parent=self)
@@ -1401,6 +1558,7 @@ class CharacterManagerFrame(ttk.Frame):
             tree.delete(*tree.get_children())
         if self.result is None:
             self._update_summary()
+            self._update_previews()
             return
         self.result.mapping = dict(self.mapping)
         self.result.excluded_sources = set(self.excluded_sources)
@@ -1421,6 +1579,7 @@ class CharacterManagerFrame(ttk.Frame):
         except OSError as exc:
             self.status_var.set(f"報表更新失敗：{exc}")
         self._update_summary()
+        self._update_previews()
 
     def _refresh_candidate_tree(self) -> None:
         if self.result is None:
@@ -1437,6 +1596,7 @@ class CharacterManagerFrame(ttk.Frame):
                 "", "end", iid=f"c{ord(glyph.character)}", text=glyph.character,
                 values=(glyph.codepoint, glyph.name, glyph.cp932_hex),
             )
+        self._update_previews()
 
     def _update_summary(self) -> None:
         if self.result is None:
