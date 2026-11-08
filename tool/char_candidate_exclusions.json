@@ -1,9 +1,5 @@
 {
-  "version": 1,
-  "moe_source": "教育部《常用國字標準字體表》4,808 字",
-  "moe_source_url": "https://language.moe.gov.tw/material/info?m=9fe3ff5a-5a8c-4817-9e60-6337dd55a509",
-  "moe_ods_url": "https://language.moe.gov.tw/uploads/files/17694982751710.ods",
-  "moe_characters_file": "MOE_4808_常用國字.txt",
+  "version": 2,
   "symbol_groups": {
     "zh_punctuation": "，。！？；：、…‥—–「」『』“”‘’（）〔〕［］【】〈〉《》〖〗〝〞﹁﹂﹃﹄﹑﹔﹕",
     "ja_punctuation": "、。「」『』・〜〝〟〘〙〚〛",

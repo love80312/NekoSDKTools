@@ -1,0 +1,17 @@
+NekoSDKTools T2 字元管理修正版
+
+請將 ZIP 內檔案依原路徑覆蓋到專案根目錄：
+- char_manager.py
+- README.md
+- char_manager_README.md
+- tool/char_manager.json
+- tool/char_candidate_exclusions.json
+- tests/test_char_manager.py（新增測試檔）
+
+請保留既有 tool/常用字.txt，不要刪除或以其他字表覆蓋。這是本專案自訂的常用字清單，新程式會直接讀取它。
+
+GUI.py、scr.py、pak.py、bmp_alp.py、requirements.txt、tool/uif_config.json 都不需要修改。
+
+字元管理器不讀取、不修改、不合併 UIF。建立映射後，使用「匯出兩行替換字串」輸出 TXT，再自行貼入指定設定。
+
+舊版 mapping_draft.json 不會自動還原，因為舊草稿可能包含過去匯入的外部映射。請重新掃描並建立新工作。
