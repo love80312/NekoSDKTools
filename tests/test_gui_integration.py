@@ -96,6 +96,39 @@ class MainGUIIntegrationTests(unittest.TestCase):
         self.assertIn("_uif_widget_uses_own_mousewheel", handler)
         self.assertIn("return None", handler)
 
+    def test_char_manager_is_embedded_in_scrollable_tab(self):
+        build_ui = self.methods["_build_ui"]
+        calls = [
+            node.func.attr for node in ast.walk(build_ui)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        self.assertIn("_build_char_tab", calls)
+
+        build_char = self.methods["_build_char_tab"]
+        source = ast.unparse(build_char)
+        self.assertIn("CharacterManagerFrame", source)
+        self.assertIn("self.char_content", source)
+        self.assertIn("self.char_canvas", source)
+        self.assertIn("self.char_scrollbar", source)
+        self.assertIn("_install_char_mousewheel", source)
+
+    def test_char_mousewheel_preserves_internal_widget_scrolling(self):
+        source = ast.unparse(self.methods["_install_char_mousewheel"])
+        source += ast.unparse(self.methods["_add_char_mousewheel_tag"])
+        self.assertIn("bind_class", source)
+        self.assertNotIn("bind_all", self.source)
+
+        widget_source = ast.unparse(
+            self.methods["_char_widget_uses_own_mousewheel"]
+        )
+        self.assertIn("Text", widget_source)
+        self.assertIn("Treeview", widget_source)
+        self.assertIn("Listbox", widget_source)
+
+        handler = ast.unparse(self.methods["_on_char_mousewheel"])
+        self.assertIn("_char_widget_uses_own_mousewheel", handler)
+        self.assertIn("return None", handler)
+
     def test_old_second_launcher_is_not_used_by_main_gui(self):
         self.assertNotIn("GUI_with_uif", self.source)
         main_function = next(

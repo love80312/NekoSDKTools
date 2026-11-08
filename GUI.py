@@ -281,16 +281,9 @@ class NekoSDKToolsGUI:
         self._build_scr_tab()
         self._build_bmp_tab()
 
-        # 直接使用 char_manager.py 中的整合式字元管理介面。
-        self.char_manager_frame = CharacterManagerFrame(
-            self.char_tab,
-            app_dir=self.tool_dir,
-        )
-
-        self.char_manager_frame.pack(
-            fill="both",
-            expand=True,
-        )
+        # 字元管理內容較長，使用外層捲動容器避免低螢幕高度或 DPI
+        # 縮放時，主要工作區及底部操作按鈕被主視窗裁切。
+        self._build_char_tab()
 
         # UIF 內容高度較長，以可捲動容器嵌入主 Notebook。
         # 保留子模組原有按鈕、載入狀態及處理流程，不複製第二套邏輯。
@@ -400,6 +393,147 @@ class NekoSDKToolsGUI:
         self.cancel_button.pack(
             side="right",
         )
+
+    def _build_char_tab(self) -> None:
+        """將字元管理介面放入可垂直捲動的分頁容器。"""
+        host = ttk.Frame(self.char_tab)
+        host.pack(fill="both", expand=True)
+        host.rowconfigure(0, weight=1)
+        host.columnconfigure(0, weight=1)
+
+        self.char_canvas = tk.Canvas(
+            host,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.char_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.char_scrollbar = ttk.Scrollbar(
+            host,
+            orient="vertical",
+            command=self.char_canvas.yview,
+        )
+        self.char_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.char_canvas.configure(
+            yscrollcommand=self.char_scrollbar.set,
+        )
+
+        self.char_content = ttk.Frame(self.char_canvas)
+        self._char_canvas_window = self.char_canvas.create_window(
+            (0, 0),
+            window=self.char_content,
+            anchor="nw",
+        )
+
+        self.char_content.bind(
+            "<Configure>",
+            self._update_char_scroll_region,
+        )
+        self.char_canvas.bind(
+            "<Configure>",
+            self._resize_char_content,
+        )
+
+        self.char_manager_frame = CharacterManagerFrame(
+            self.char_content,
+            app_dir=self.tool_dir,
+        )
+        self.char_manager_frame.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self._install_char_mousewheel()
+
+    def _update_char_scroll_region(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        """依字元管理內容實際尺寸更新垂直捲動範圍。"""
+        bounds = self.char_canvas.bbox("all")
+        if bounds is not None:
+            self.char_canvas.configure(scrollregion=bounds)
+
+    def _resize_char_content(self, event: tk.Event) -> None:
+        """讓字元管理內容寬度跟隨分頁，避免不必要的水平捲動。"""
+        self.char_canvas.itemconfigure(
+            self._char_canvas_window,
+            width=max(1, event.width),
+        )
+
+    def _install_char_mousewheel(self) -> None:
+        """只替字元管理分頁安裝專用滾輪事件，不影響其他分頁。"""
+        self._char_mousewheel_tag = f"NekoCharMouseWheel{id(self)}"
+
+        self.root.bind_class(
+            self._char_mousewheel_tag,
+            "<MouseWheel>",
+            self._on_char_mousewheel,
+        )
+        self.root.bind_class(
+            self._char_mousewheel_tag,
+            "<Button-4>",
+            self._on_char_mousewheel_linux,
+        )
+        self.root.bind_class(
+            self._char_mousewheel_tag,
+            "<Button-5>",
+            self._on_char_mousewheel_linux,
+        )
+
+        self._add_char_mousewheel_tag(self.char_tab)
+
+    def _add_char_mousewheel_tag(self, widget: tk.Widget) -> None:
+        """遞迴替字元管理分頁現有元件加上專用 bindtag。"""
+        tags = widget.bindtags()
+        if self._char_mousewheel_tag not in tags:
+            widget.bindtags((self._char_mousewheel_tag, *tags))
+
+        for child in widget.winfo_children():
+            self._add_char_mousewheel_tag(child)
+
+    @staticmethod
+    def _char_widget_uses_own_mousewheel(widget: object) -> bool:
+        """保留文字框、清單及內層分頁自己的滾輪操作。"""
+        try:
+            widget_class = widget.winfo_class()  # type: ignore[attr-defined]
+        except (AttributeError, tk.TclError):
+            return False
+
+        return widget_class in {"Text", "Treeview", "Listbox"}
+
+    def _on_char_mousewheel(self, event: tk.Event) -> str | None:
+        if self._char_widget_uses_own_mousewheel(
+            getattr(event, "widget", None)
+        ):
+            return None
+
+        delta = int(getattr(event, "delta", 0))
+        if delta:
+            if sys.platform == "darwin":
+                step = -1 if delta > 0 else 1
+            else:
+                units = max(1, abs(delta) // 120)
+                step = -units if delta > 0 else units
+
+            self.char_canvas.yview_scroll(step, "units")
+
+        return "break"
+
+    def _on_char_mousewheel_linux(self, event: tk.Event) -> str | None:
+        if self._char_widget_uses_own_mousewheel(
+            getattr(event, "widget", None)
+        ):
+            return None
+
+        number = int(getattr(event, "num", 0))
+
+        if number == 4:
+            self.char_canvas.yview_scroll(-1, "units")
+        elif number == 5:
+            self.char_canvas.yview_scroll(1, "units")
+
+        return "break"
 
     def _build_uif_tab(self) -> None:
         """將 UIFCharHelperApp 直接嵌入主視窗的 UIF 同層分頁。"""
