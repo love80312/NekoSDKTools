@@ -1,17 +1,31 @@
 # UIF 字元配對與翻譯文件替換工具
 
-`uif_char_helper.py` 是 UIF 輔助模組，不匯入 `char_manager.py`，也不會自動讀取專案內的 `tool/uif_config.json`。使用 `GUI_with_uif.py` 啟動整合主介面時，它會出現在主視窗 Notebook 中、緊接「字元管理」右側的同層級「UIF 輔助工具」分頁；也可保留原本的獨立啟動方式。
+`uif_char_helper.py` 是 UIF 輔助工具的功能核心。它可獨立啟動，也可由主程式 `GUI.py` 直接嵌入為「字元管理」右側的同層級分頁。新版只需要一個主 GUI，不必使用 `GUI_with_uif.py`。
 
 ## 啟動
+
+主程式（PAK、腳本／JSON、BMP／ALP、字元管理及 UIF 輔助工具）：
+
+```bat
+py -3 GUI.py
+```
+
+單獨啟動 UIF 輔助工具：
 
 ```bat
 py -3 uif_char_helper.py
 ```
 
-單獨啟動時會開啟獨立 GUI。整合至主介面時，請改執行 `py -3 GUI_with_uif.py`；「UIF 輔助工具」會是主視窗的獨立分頁，排列在「字元管理」右側。兩種方式使用相同控制項與處理流程。請分別選取：
+主程式的 UIF 分頁和獨立 GUI 使用同一個 `UIFCharHelperApp`，不會複製另一套功能邏輯。 主程式內的 UIF 頁面可使用右側捲軸或滑鼠滾輪；摘要文字框與配對清單的內部滾動不會被外層頁面攔截。
+
+## 輸入資料
+
+請在 UIF 分頁分別選取：
 
 1. 遊戲資料夾內實際使用的 `uif_config.json`。
 2. `char_manager.py` 掃描後產生的 `*_char_report` 資料夾。
+
+不要把專案內的 `tool/uif_config.json` 當成遊戲實際使用的 UIF 設定。工具不會自動讀取它，也不會自行修改遊戲的 UIF 設定。
 
 按「讀取設定與報表」後，工具會保留 UIF 既有映射，再合併報表 `mapping_pairs.csv` 中的 char_manager 人工映射。接著才處理尚未映射的目標字與安全候選字。GUI 與 CLI 都使用相同合併順序。
 
@@ -27,7 +41,7 @@ py -3 uif_char_helper.py
 - UIF 與人工映射已處理的目標字不會再次配對。
 - 新增映射的來源與目標各自不得重複。
 - 候選不足時只建立可完成的配對，並顯示剩餘數量；不會重複使用候選字。
-- 既有 UIF 目標字重複時仍保留原始順序及內容；`repeat` 不會併入兩行映射。
+- 既有 UIF 目標字重複時仍保留原始順序及內容；`repeat` 不會併入雙行映射。
 
 ## 匯出兩行映射
 
@@ -50,10 +64,9 @@ target_characters 的完整目標字串
 - 其他支援文字格式：依 `scan_metadata.json` 的 `translation_text_encoding` 讀寫，也可在 GUI／CLI 指定覆寫編碼。
 - 不支援的非文字檔會原樣複製。
 - 遇到讀取、解碼或 JSON 格式錯誤時，該檔原樣複製並列出警告，不會靜默略過。
-- 原始檔不會被修改。
 - 處理完成後會檢查翻譯文字值中仍不能以 CP932 編碼的字元，列出檔案、字元、Unicode 編碼及次數。
 
-**CP932 檢查只會提出警告，不會強制把 UTF-8 或其他翻譯檔重新編碼為 CP932。** 未配對的字元仍保留在輸出檔案中，需回到 char_manager 報表補配或人工處理。JSON 的 CP932 檢查只掃描字串值，不掃描鍵；JSON 中即使使用 `\u` escape 表示字元，也會先解碼後檢查。
+**CP932 檢查只會提出警告，不會強制把 UTF-8 或其他翻譯檔重新編碼為 CP932。** 未配對的字元仍保留在輸出檔案中，需回到 char_manager 報表補配或人工處理。JSON 的 CP932 檢查只掃描字串值，不掃描鍵；JSON 中即使使用 `\\u` escape 表示字元，也會先解碼後檢查。
 
 處理資料夾時，工具會跳過來源子目錄及檔案中的符號連結／Junction。若指定的翻譯來源根目錄本身是符號連結或 Junction，則會停止處理。
 
@@ -73,12 +86,10 @@ py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\T
 py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\Translation_char_report" --auto-pair --translations "D:\Translation" --output "D:\Translation_replaced"
 ```
 
-若需要覆寫一般文字檔編碼，可加入 `--encoding cp932`、`--encoding gbk` 或其他 Python 支援的編碼名稱。JSON 仍固定以 UTF-8 處理。CLI 會合併 UIF 既有映射、char_manager 人工映射及本次新增配對，匯出結果不會漏掉 `mapping_pairs.csv` 的人工配對。
+若需要覆寫一般文字檔編碼，可加入 `--encoding cp932`、`--encoding gbk` 或其他 Python 支援的編碼名稱。JSON 仍固定以 UTF-8 處理。CLI 會合併 UIF 既有映射、char_manager 人工映射及本次新增配對。
 
 ## 與 char_manager.py 的關係
 
-`char_manager.py` 的掃描、候選篩選、人工配對及報表邏輯仍不讀取或修改 UIF；整合主介面只是在「字元管理」右側新增本工具的獨立分頁。兩套資料仍各自獨立，UIF 既有映射不會寫回 `char_manager` 工作草稿。
+`char_manager.py` 的掃描、候選篩選、人工配對及報表邏輯仍不讀取或修改 UIF。主 GUI 只是在「字元管理」右側新增本工具的獨立分頁；兩套資料仍各自獨立，UIF 既有映射不會寫回 char_manager 工作草稿。
 
-這版的 CP932 殘留檢查是替換後的提示功能：它不會替使用者自動建立新映射，也不會強制重編碼輸出檔。請依提示回到字元管理報表處理未配對字元。
-
-`char_manager.py` 的 `unmapped_characters.txt` 會排除 `char_manager.json` 的 `excluded_target_characters`，並將排除清單寫入 `scan_metadata.json`。更新 `char_manager.py` 後，請重新掃描一次，再把新報表提供給 `uif_char_helper.py`。
+`char_manager.py` 的 `unmapped_characters.txt` 會排除 `char_manager.json` 的 `excluded_target_characters`，並將排除清單寫入 `scan_metadata.json`。更新 `char_manager.py` 後，請重新掃描一次，再載入新報表。

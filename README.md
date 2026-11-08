@@ -8,13 +8,12 @@
 
 | 檔案／資料夾 | 用途 |
 |---|---|
-| `GUI.py` | 基礎 Tkinter 主介面，整合 PAK、腳本、BMP／ALP 及字元管理 |
-| `GUI_with_uif.py` | 整合版主介面；在「字元管理」右側新增同層級的「UIF 輔助工具」分頁 |
+| `GUI.py` | 唯一主 GUI，整合 PAK、腳本、BMP／ALP、字元管理及 UIF 輔助工具 |
 | `pak.py` | 解包 NEKOPACK4A／NEKOPACK4S，並可重包成 4A 或 4S |
 | `scr.py` | 解析 NEKOSDK_ADVSCRIPT2，將可辨識的對話／選項匯出為 UTF-8 JSON，再匯入修改內容 |
 | `bmp_alp.py` | BMP+ALP 與一般圖片之間的合併／拆分工具 |
 | `char_manager.py` | CP932 字元統計、候選排除、映射工作區及字元管理介面 |
-| `uif_char_helper.py` | UIF 輔助分頁的功能核心；由 `GUI_with_uif.py` 嵌入，也可獨立啟動 |
+| `uif_char_helper.py` | UIF 輔助工具功能核心；由 `GUI.py` 嵌入，也可獨立啟動 |
 | `tool/常用字.txt` | 使用者自訂的常用字排除清單 |
 | `tool/char_manager.json` | 字元管理設定、人工排除及候選排除開關 |
 | `tool/char_candidate_exclusions.json` | 中文／日文標點、常用符號及自訂排除字元 |
@@ -35,15 +34,15 @@
 py -3 -m pip install -r requirements.txt
 ```
 
-啟動包含 UIF 同層級分頁的整合圖形介面：
+啟動唯一整合主 GUI：
 
 ```bat
-py -3 GUI_with_uif.py
+py -3 GUI.py
 ```
 
-`GUI_with_uif.py` 會沿用 `GUI.py` 的主視窗，在「字元管理」右側新增獨立的「UIF 輔助工具」分頁；兩者是主視窗 Notebook 的同層級分頁，不是字元管理內的子分頁。`GUI.py` 仍可單獨啟動原本的基本介面。
+主視窗的分頁順序為「PAK 封包」、「腳本／JSON」、「BMP／ALP 圖像」、「字元管理」、「UIF 輔助工具」。UIF 輔助工具是「字元管理」右側的同層級分頁，不是另一個視窗，也不是字元管理內的子分頁。 UIF 頁面內容過長時可使用滑鼠滾輪或右側捲軸；摘要文字框及配對清單仍保留各自的滾輪操作。
 
-`GUI.py`、`GUI_with_uif.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py`、`uif_char_helper.py` 請放在同一個資料夾。UIF 輔助工具仍可透過 `py -3 uif_char_helper.py` 獨立啟動；整合版與獨立版共用同一套 UIF 功能，不會自動讀取或修改任何 UIF 設定。
+`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py`、`uif_char_helper.py` 請放在同一個資料夾。UIF 輔助工具仍可透過 `py -3 uif_char_helper.py` 獨立啟動；主 GUI 與獨立 GUI 共用同一套 UIF 功能，不會自動讀取或修改任何 UIF 設定。舊版 `GUI_with_uif.py` 已不再是必要啟動檔，請直接使用 `GUI.py`。
 
 ---
 
@@ -221,7 +220,7 @@ py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 
 ## 4. CP932 字元統計與替代字元管理
 
-`char_manager.py` 可獨立執行，也由 `GUI.py`／`GUI_with_uif.py` 內的「字元管理」頁籤呼叫。此功能統計翻譯文件中的漢字、標點及符號，找出 CP932 無法編碼的目標字元，再從 CP932 字形目錄建立替代來源配對。
+`char_manager.py` 可獨立執行，也由 `GUI.py` 內的「字元管理」頁籤呼叫。此功能統計翻譯文件中的漢字、標點及符號，找出 CP932 無法編碼的目標字元，再從 CP932 字形目錄建立替代來源配對。
 
 ### 4.1 掃描來源
 
@@ -256,7 +255,7 @@ py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 
 ### 4.3 GUI 操作
 
-1. 開啟 `GUI_with_uif.py`，切換到「字元管理」頁籤。
+1. 啟動 `py -3 GUI.py`，切換到「字元管理」頁籤。
 2. 選擇翻譯文件資料夾。
 3. 視需要選擇已解包的原始遊戲腳本資料夾。
 4. 設定翻譯文字、原始指令及對話編碼。
@@ -321,20 +320,25 @@ py -3 char_manager.py scan --translations "D:\Game\translation_json" --source "D
 翻譯文件或指定的原始腳本只要有必要檔案讀取／解析失敗，安全候選就會清空，避免將部分掃描結果誤認為完整結果。修正錯誤後請重新掃描。
 
 ---
-
 ## 5. UIF 字元配對與翻譯文件替換
 
-`uif_char_helper.py` 提供 UIF 輔助功能。`GUI_with_uif.py` 會在主 Notebook 中、緊鄰「字元管理」右側加入「UIF 輔助工具」同層級分頁；也可單獨執行 `py -3 uif_char_helper.py`。其用途是將字元管理器輸出的人工映射、遊戲現有 UIF 映射及本次自動配對整合，產生可自行貼入 UIF 的完整兩行字串；另外也能將翻譯文件中的目標字替換成對應來源字，另存至新資料夾。
+`uif_char_helper.py` 提供 UIF 輔助功能，並由 `GUI.py` 在「字元管理」右側以同層級分頁嵌入；也可單獨執行 `py -3 uif_char_helper.py`。其用途是將字元管理器輸出的人工映射、遊戲現有 UIF 映射及本次自動配對整合，產生可自行貼入 UIF 的完整兩行字串；另外也能將翻譯文件中的目標字替換成對應來源字，另存至新資料夾。
 
 ### 5.1 啟動與讀取
 
-啟動獨立 GUI：
+主 GUI：
+
+```bat
+py -3 GUI.py
+```
+
+也可獨立啟動 UIF 輔助工具：
 
 ```bat
 py -3 uif_char_helper.py
 ```
 
-GUI 中選擇兩個輸入：
+UIF 分頁中選擇兩個輸入：
 
 1. 遊戲資料夾內實際使用的 `uif_config.json`，不是專案的 `tool/uif_config.json`。
 2. `char_manager.py` 產生的 `*_char_report` 報表資料夾。
@@ -358,7 +362,7 @@ target_characters 的完整目標字串
 
 ### 5.3 翻譯文件替換
 
-GUI 的「開始替換並另存」會將完整映射反向套用，把翻譯文件中的目標字換成來源字，輸出到另一個資料夾。輸出位置不可與來源相同、不可位於來源資料夾內，也不可使用非空資料夾；原始檔不會被覆寫。
+「開始替換並另存」會將完整映射反向套用，把翻譯文件中的目標字換成來源字，輸出到另一個資料夾。輸出位置不可與來源相同、不可位於來源資料夾內，也不可使用非空資料夾；原始檔不會被覆寫。
 
 - JSON：只替換字串值，不修改鍵；保留原始縮排、空白及其他 JSON 格式，固定以 UTF-8 處理。
 - 其他支援文字格式：使用 `scan_metadata.json` 的 `translation_text_encoding`，或由 GUI／CLI 指定編碼。
@@ -394,8 +398,8 @@ py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\T
 
 | 檔案／資料夾 | 判定 | 說明 |
 |---|---|---|
-| `GUI.py`、`GUI_with_uif.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` | 必要 | 基礎主介面、整合版主介面及各主功能程式 |
-| `uif_char_helper.py` | GUI 整合／可獨立啟動 | 需要整理 UIF 映射或替換翻譯文件時使用 |
+| `GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` | 必要 | 唯一主介面及各主功能程式 |
+| `uif_char_helper.py` | 必要 | 主 GUI 整合分頁及獨立啟動共用的 UIF 功能 |
 | `char_manager_README.md`、`README_uif_char_helper.md` | 建議保留 | 兩個字元工具的詳細操作文件 |
 | `tool/常用字.txt` | 必要 | 使用者自訂的常用字清單 |
 | `tool/char_manager.json` | 建議保留 | 人工排除及編碼設定 |
@@ -404,4 +408,4 @@ py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\T
 | `tool/uif_config.json` | 與字元管理器分離 | `char_manager.py` 與 `uif_char_helper.py` 都不會把它當成遊戲實際使用的 UIF 讀取 |
 | `mapping_draft.json`、`char_manager_last_work.json` | 工作狀態 | 可由 GUI 續作；分享前請檢查本機路徑 |
 
-`tool/常用字.txt` 是使用者資料，更新程式時請保留原檔內容，不要以其他字表覆蓋。
+`GUI_with_uif.py` 是舊版額外啟動檔，新版已將分頁直接整合進 `GUI.py`；確認不再需要舊入口後，可從 GitHub T2 分支刪除該檔。`tool/常用字.txt` 是使用者資料，更新程式時請保留原檔內容，不要以其他字表覆蓋。

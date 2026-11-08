@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """NekoSDKTools GUI - Tkinter front-end for pak.py, scr.py and bmp_alp.py.
 
-Place GUI.py, pak.py, scr.py, bmp_alp.py and char_manager.py
-in the same directory.
+Place GUI.py, pak.py, scr.py, bmp_alp.py, char_manager.py and
+uif_char_helper.py in the same directory.
 
 Requires Python 3.10+.
 Pillow is required only by bmp_alp.py.
@@ -19,8 +19,9 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-# 字元管理已整合至 char_manager.py，不再依賴 char_manager_session.py。
+# 字元管理及 UIF 輔助工具均以 Frame 形式嵌入同一個主視窗。
 from char_manager import CharacterManagerFrame
+from uif_char_helper import UIFCharHelperApp
 
 
 APP_NAME = "NekoSDKTools 圖形介面"
@@ -209,7 +210,8 @@ class NekoSDKToolsGUI:
             text=(
                 "NEKOPACK4A／4S 封包、"
                 "ADVSCRIPT2 腳本 JSON、"
-                "BMP／ALP 圖像轉換"
+                "BMP／ALP 圖像轉換、"
+                "字元管理與 UIF 輔助"
             ),
             style="Hint.TLabel",
         ).pack(
@@ -244,6 +246,11 @@ class NekoSDKToolsGUI:
             padding=6,
         )
 
+        self.uif_tab = ttk.Frame(
+            self.notebook,
+            padding=6,
+        )
+
         self.notebook.add(
             self.pak_tab,
             text="PAK 封包",
@@ -264,6 +271,12 @@ class NekoSDKToolsGUI:
             text="字元管理",
         )
 
+        # UIF 是字元管理右側的同層級分頁，不再另設第二個主 GUI。
+        self.notebook.add(
+            self.uif_tab,
+            text="UIF 輔助工具",
+        )
+
         self._build_pak_tab()
         self._build_scr_tab()
         self._build_bmp_tab()
@@ -278,6 +291,10 @@ class NekoSDKToolsGUI:
             fill="both",
             expand=True,
         )
+
+        # UIF 內容高度較長，以可捲動容器嵌入主 Notebook。
+        # 保留子模組原有按鈕、載入狀態及處理流程，不複製第二套邏輯。
+        self._build_uif_tab()
 
         log_frame = ttk.LabelFrame(
             outer,
@@ -384,10 +401,148 @@ class NekoSDKToolsGUI:
             side="right",
         )
 
+    def _build_uif_tab(self) -> None:
+        """將 UIFCharHelperApp 直接嵌入主視窗的 UIF 同層分頁。"""
+        host = ttk.Frame(self.uif_tab)
+        host.pack(
+            fill="both",
+            expand=True,
+        )
+        host.rowconfigure(0, weight=1)
+        host.columnconfigure(0, weight=1)
+
+        self.uif_canvas = tk.Canvas(
+            host,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.uif_canvas.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+        )
+
+        self.uif_scrollbar = ttk.Scrollbar(
+            host,
+            orient="vertical",
+            command=self.uif_canvas.yview,
+        )
+        self.uif_scrollbar.grid(
+            row=0,
+            column=1,
+            sticky="ns",
+        )
+        self.uif_canvas.configure(
+            yscrollcommand=self.uif_scrollbar.set,
+        )
+
+        self.uif_content = ttk.Frame(self.uif_canvas)
+        self._uif_canvas_window = self.uif_canvas.create_window(
+            (0, 0),
+            window=self.uif_content,
+            anchor="nw",
+        )
+
+        self.uif_content.bind(
+            "<Configure>",
+            self._update_uif_scroll_region,
+        )
+        self.uif_canvas.bind(
+            "<Configure>",
+            self._resize_uif_content,
+        )
+
+        self.uif_helper_frame = UIFCharHelperApp(
+            self.uif_content,
+        )
+        self.uif_helper_frame.pack(
+            fill="both",
+            expand=True,
+        )
+
+        self._install_uif_mousewheel()
+
+    def _update_uif_scroll_region(self, _event: tk.Event | None = None) -> None:
+        """依 UIF 內容實際尺寸更新垂直捲動範圍。"""
+        bounds = self.uif_canvas.bbox("all")
+        if bounds is not None:
+            self.uif_canvas.configure(
+                scrollregion=bounds,
+            )
+
+    def _resize_uif_content(self, event: tk.Event) -> None:
+        """讓 UIF 內容寬度跟隨分頁，避免不必要的水平捲動。"""
+        self.uif_canvas.itemconfigure(
+            self._uif_canvas_window,
+            width=max(1, event.width),
+        )
+
+    def _install_uif_mousewheel(self) -> None:
+        """只替 UIF 分頁的元件安裝滾輪事件，不更動其他全域綁定。"""
+        self._uif_mousewheel_tag = f"NekoUIFMouseWheel{id(self)}"
+        self.root.bind_class(
+            self._uif_mousewheel_tag,
+            "<MouseWheel>",
+            self._on_uif_mousewheel,
+        )
+        self.root.bind_class(
+            self._uif_mousewheel_tag,
+            "<Button-4>",
+            self._on_uif_mousewheel_linux,
+        )
+        self.root.bind_class(
+            self._uif_mousewheel_tag,
+            "<Button-5>",
+            self._on_uif_mousewheel_linux,
+        )
+        self._add_uif_mousewheel_tag(self.uif_tab)
+
+    def _add_uif_mousewheel_tag(self, widget: tk.Widget) -> None:
+        """遞迴替 UIF 分頁現有元件加上專用 bindtag。"""
+        tags = widget.bindtags()
+        if self._uif_mousewheel_tag not in tags:
+            widget.bindtags((self._uif_mousewheel_tag, *tags))
+        for child in widget.winfo_children():
+            self._add_uif_mousewheel_tag(child)
+
+    @staticmethod
+    def _uif_widget_uses_own_mousewheel(widget: object) -> bool:
+        """保留文字框、清單等控制項自己的滾輪操作。"""
+        try:
+            widget_class = widget.winfo_class()  # type: ignore[attr-defined]
+        except (AttributeError, tk.TclError):
+            return False
+        return widget_class in {"Text", "Treeview", "Listbox"}
+
+    def _on_uif_mousewheel(self, event: tk.Event) -> str | None:
+        # Text／Treeview／Listbox 先交由 Tk 自己處理，避免外層捲動搶走操作。
+        if self._uif_widget_uses_own_mousewheel(getattr(event, "widget", None)):
+            return None
+
+        delta = int(getattr(event, "delta", 0))
+        if delta:
+            if sys.platform == "darwin":
+                step = -1 if delta > 0 else 1
+            else:
+                units = max(1, abs(delta) // 120)
+                step = -units if delta > 0 else units
+            self.uif_canvas.yview_scroll(step, "units")
+        return "break"
+
+    def _on_uif_mousewheel_linux(self, event: tk.Event) -> str | None:
+        if self._uif_widget_uses_own_mousewheel(getattr(event, "widget", None)):
+            return None
+
+        number = int(getattr(event, "num", 0))
+        if number == 4:
+            self.uif_canvas.yview_scroll(-1, "units")
+        elif number == 5:
+            self.uif_canvas.yview_scroll(1, "units")
+        return "break"
+
     # ------------------------------------------------------------------
     # 共用路徑及工具函式
     # ------------------------------------------------------------------
-
     def _path_row(
         self,
         parent: ttk.Frame,
@@ -2468,4 +2623,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-    
