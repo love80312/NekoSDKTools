@@ -24,6 +24,7 @@ import codecs
 import json
 import os
 import shutil
+import stat
 import struct
 import sys
 import tempfile
@@ -203,10 +204,58 @@ def dialogue_choice_encoding(dialogue_encoding: str) -> str:
     return "gbk" if dialogue_encoding == "auto" else dialogue_encoding
 
 
+def is_link_or_junction(path: Path) -> bool:
+    """Detect symbolic links and Windows reparse points without following them.
+
+    ``Path.is_junction()`` is only available on newer Python versions. Checking
+    ``lstat().st_file_attributes`` also detects Junctions on older Windows
+    Python versions (including Python 3.10/3.11).
+    """
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ScriptError(
+            f"cannot inspect input path safely: {path}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if stat.S_ISLNK(info.st_mode):
+        return True
+
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    attributes = getattr(info, "st_file_attributes", 0)
+    if attributes & reparse_attribute:
+        return True
+
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            return bool(is_junction())
+        except OSError:
+            # If the check fails, fail closed rather than follow an uncertain path.
+            return True
+    return False
+
+
 def read_script(path: Path) -> Script:
-    data = path.read_bytes()
-    if not data.startswith(MAGIC):
-        raise ScriptError(f"invalid ADVSCRIPT2 signature: {path}")
+    """Read and parse one ADVSCRIPT2 script.
+
+    Read only the fixed-size signature first. Non-script resources (including
+    large images, audio and video files) are rejected without loading their
+    complete contents into memory. Only a matching signature permits the
+    remaining file bytes to be read.
+    """
+    path = Path(path)
+    if is_link_or_junction(path):
+        raise ScriptError(f"symbolic links and junctions are not supported: {path}")
+
+    with path.open("rb") as handle:
+        signature = handle.read(len(MAGIC))
+        if signature != MAGIC:
+            raise ScriptError(f"invalid ADVSCRIPT2 signature: {path}")
+        data = signature + handle.read()
 
     pos = len(MAGIC)
     count = read_u32(data, pos, "record count")
@@ -1158,12 +1207,52 @@ def import_file(
 
 
 def iter_files(root: Path) -> list[Path]:
+    """List regular files recursively without following links or Junctions.
+
+    A link/reparse point in the source tree is treated as an error instead of
+    being followed or silently omitted. This prevents a folder operation from
+    escaping the selected source directory on Windows and other platforms.
+    """
+    root = Path(root)
+    if is_link_or_junction(root):
+        raise ScriptError(
+            f"symbolic links and junctions are not supported: {root}"
+        )
+    if not root.is_dir():
+        raise ScriptError(f"input folder does not exist or is not a directory: {root}")
+
     files: list[Path] = []
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ScriptError(f"symbolic links are not supported: {path}")
-        if path.is_file():
-            files.append(path)
+
+    def on_walk_error(exc: OSError) -> None:
+        location = getattr(exc, "filename", None) or root
+        raise ScriptError(
+            f"cannot enumerate input folder: {location}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    for current, dirnames, filenames in os.walk(
+        root, topdown=True, onerror=on_walk_error, followlinks=False
+    ):
+        current_path = Path(current)
+        dirnames.sort(key=str.casefold)
+        filenames.sort(key=str.casefold)
+
+        for dirname in dirnames:
+            directory = current_path / dirname
+            if is_link_or_junction(directory):
+                raise ScriptError(
+                    f"symbolic links and junctions are not supported: {directory}"
+                )
+
+        for filename in filenames:
+            file_path = current_path / filename
+            if is_link_or_junction(file_path):
+                raise ScriptError(
+                    f"symbolic links and junctions are not supported: {file_path}"
+                )
+            if file_path.is_file():
+                files.append(file_path)
+
     return sorted(files, key=lambda p: p.as_posix().casefold())
 
 
@@ -1185,7 +1274,8 @@ def export_path(
         raise ScriptError(f"no files found: {input_path}")
 
     # Pass 1: identify valid ADVSCRIPT2 scripts. Ordinary resources are
-    # excluded; files carrying the signature but malformed internally fail.
+    # excluded after reading only the fixed-size signature; files carrying
+    # the signature but malformed internally still fail validation.
     scripts: list[Path] = []
     for file_path in files:
         try:
@@ -1314,8 +1404,9 @@ def import_path(
     loaded_scripts: dict[Path, Script] = {}
     validation_errors: list[str] = []
 
-    # 先辨識整個來源資料夾。遇到簽章無效的一般資源就略過；
-    # 若檔案有 ADVSCRIPT2 簽章但內容損壞，記錄錯誤並繼續檢查其他檔案。
+    # Identify the complete source tree before preparing any output. A file
+    # without the ADVSCRIPT2 signature is a resource and is copied unchanged;
+    # a signed but malformed file is reported as a damaged script.
     for file_path in files:
         try:
             script = read_script(file_path)
@@ -1367,7 +1458,7 @@ def import_path(
         json_path, json_relatives, "translation JSON"
     )
 
-    # 將所有缺少的 JSON 一次列出，不能只回報第一個缺檔。
+    # Report every missing JSON instead of stopping at the first one.
     missing_json: list[tuple[Path, Path]] = []
     for file_path, json_relative in zip(scripts, json_relatives):
         source_json = json_path / json_relative
@@ -1385,8 +1476,8 @@ def import_path(
 
     missing_json_paths = {json_path for _script, json_path in missing_json}
 
-    # 驗證每個現存 JSON 及其編碼變更。任何一個檔案失敗都只記錄錯誤，
-    # 不會提早停止；全部檢查完後再決定是否允許進入暫存與提交階段。
+    # Validate every JSON and encoding change. Any failure is accumulated;
+    # no output is staged or committed until all scripts have passed.
     prepared_scripts: dict[Path, Script] = {}
     for file_path, json_relative in zip(scripts, json_relatives):
         source_json = json_path / json_relative
@@ -1575,7 +1666,7 @@ def main(argv: list[str] | None = None) -> int:
             if len(args.paths) != 3:
                 parser.error(
                     "import requires exactly: original_path "
-                    "json_folder output_path"
+                    "JSON_folder output_path"
                 )
 
             import_path(

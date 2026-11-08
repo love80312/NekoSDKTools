@@ -1,9 +1,12 @@
 import json
+import stat
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import scr
 
@@ -116,6 +119,123 @@ class MixedEncodingImportTests(unittest.TestCase):
             ):
                 scr.load_translation(path)
 
+    def test_read_script_rejects_non_script_before_reading_full_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "large_resource.bin"
+            path.write_bytes(b"NOT_AN_ADVSCRIPT2_FILE" + b"X" * (4 * 1024 * 1024))
+
+            # 非腳本資源只應讀取 MAGIC 長度的檔頭，不應呼叫整檔 read_bytes()。
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("read_bytes() must not be used"),
+            ):
+                with self.assertRaisesRegex(
+                    scr.ScriptError, "invalid ADVSCRIPT2 signature"
+                ):
+                    scr.read_script(path)
+
+    def test_windows_reparse_point_fallback_detects_legacy_junction(self):
+        fake_stat = SimpleNamespace(
+            st_mode=stat.S_IFDIR,
+            st_file_attributes=0x0400,
+        )
+        with mock.patch.object(Path, "lstat", return_value=fake_stat):
+            self.assertTrue(scr.is_link_or_junction(Path("legacy-junction")))
+
+    def test_iter_files_rejects_symbolic_link_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            link = root / "linked_root"
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"目前環境不允許建立目錄符號連結：{exc}")
+
+            with self.assertRaisesRegex(
+                scr.ScriptError, "symbolic links and junctions are not supported"
+            ):
+                scr.iter_files(link)
+
+    def test_iter_files_rejects_nested_file_and_directory_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            source.mkdir()
+            outside_file = root / "outside.bin"
+            outside_file.write_bytes(b"resource")
+            outside_dir = root / "outside_dir"
+            outside_dir.mkdir()
+
+            file_link = source / "linked_file.bin"
+            dir_link = source / "linked_dir"
+            try:
+                file_link.symlink_to(outside_file)
+                dir_link.symlink_to(outside_dir, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"目前環境不允許建立符號連結：{exc}")
+
+            with self.assertRaisesRegex(
+                scr.ScriptError, "symbolic links and junctions are not supported"
+            ):
+                scr.iter_files(source)
+
+    def test_folder_export_skips_large_non_script_without_reading_entire_asset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "original"
+            output = root / "json"
+            original.mkdir()
+            create_script(original / "scene.txt", "Export me")
+            resource = original / "large_video.bin"
+            resource.write_bytes(b"VIDEO" + b"R" * (2 * 1024 * 1024))
+
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("read_bytes() must not be used"),
+            ):
+                scr.export_path(original, output, "cp932", "cp932")
+
+            exported = json.loads(
+                (output / "scene.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(exported, [{"message": "Export me"}])
+            self.assertFalse((output / "large_video.json").exists())
+
+    def test_folder_import_copies_large_resource_without_parsing_it_as_script(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "original"
+            translations = root / "json"
+            output = root / "output"
+            original.mkdir()
+            translations.mkdir()
+
+            create_script(original / "scene.txt", "Original")
+            resource = original / "large_video.bin"
+            resource_data = b"VIDEO" + b"R" * (2 * 1024 * 1024)
+            resource.write_bytes(resource_data)
+            (translations / "scene.json").write_text(
+                json.dumps([{"message": "Translated"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("read_bytes() must not be used"),
+            ):
+                scr.import_path(
+                    original, translations, output, "cp932", "cp932"
+                )
+
+            self.assertEqual((output / "large_video.bin").read_bytes(), resource_data)
+            imported = scr.read_script(output / "scene.txt")
+            self.assertEqual(imported.records[0].args[1], b"Translated\0")
+
     def test_folder_import_reports_all_json_failures_without_partial_output(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -147,7 +267,7 @@ class MixedEncodingImportTests(unittest.TestCase):
                 '[{"message": "unfinished"',
                 encoding="utf-8",
             )
-            # d_missing.json 故意不建立。
+            # d_missing_json.json 故意不建立。
 
             stdout = StringIO()
             stderr = StringIO()
