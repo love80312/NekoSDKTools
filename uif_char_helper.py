@@ -9,6 +9,7 @@
 3. 保留 UIF 既有映射，排除已使用的來源／目標，自動建立新增的一對一配對。
 4. 輸出可直接貼入 UIF 的完整兩行 source_characters / target_characters。
 5. 依完整映射將翻譯文件中的目標字替換為來源字，另存新資料夾，不覆寫原始檔。
+6. 每次執行替換前，將本次完整映射備份為兩行 TXT 至報表資料夾。
 
 僅使用 Python 3.10+ 標準函式庫；不匯入 char_manager.py。
 """
@@ -26,6 +27,7 @@ import tempfile
 import tkinter as tk
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Iterable
@@ -409,6 +411,36 @@ def write_two_line_file(path: Path, pairs: Iterable[MappingPair]) -> None:
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def save_mapping_snapshot(
+    report_root: Path,
+    pairs: Iterable[MappingPair],
+) -> Path:
+    """將本次實際使用的完整映射備份為報表資料夾內的兩行 TXT。
+
+    TXT 不加標題、欄位名稱或其他說明：
+    第一行 source_characters，第二行 target_characters。
+    """
+    report_root = Path(report_root).expanduser().resolve()
+    if not report_root.is_dir():
+        raise UIFHelperError(f"映射備份失敗：報表資料夾不存在：{report_root}")
+
+    # 先建立內容，確保映射本身有效，再建立任何備份檔案。
+    payload_pairs = list(pairs)
+    make_two_line_text(payload_pairs)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    base_name = f"uif_mapping_{timestamp}"
+    snapshot_path = report_root / f"{base_name}.txt"
+    suffix = 1
+
+    while snapshot_path.exists():
+        snapshot_path = report_root / f"{base_name}_{suffix:02d}.txt"
+        suffix += 1
+
+    write_two_line_file(snapshot_path, payload_pairs)
+    return snapshot_path
 
 
 def build_reverse_mapping(pairs: Iterable[MappingPair]) -> tuple[dict[str, str], list[str]]:
@@ -1022,22 +1054,65 @@ class UIFCharHelperApp(ttk.Frame):
             messagebox.showerror("複製失敗", str(exc), parent=self)
 
     def _replace(self) -> None:
+        snapshot_path: Path | None = None
         try:
             context = self._require_current_context()
             pairs = self._all_pairs()
+
             translation_text = self.translation_var.get().strip().strip('"')
             output_text = self.output_var.get().strip().strip('"')
             if not translation_text or not output_text:
                 raise UIFHelperError("請指定翻譯來源資料夾及替換後輸出資料夾。")
+
+            source_root = Path(translation_text).expanduser().absolute()
+            output_root = Path(output_text).expanduser().absolute()
+
+            if not source_root.exists():
+                raise UIFHelperError(f"翻譯來源不存在：{source_root}")
+            if _is_link(source_root):
+                raise UIFHelperError(
+                    f"翻譯來源本身是符號連結或 Junction，為避免追蹤路徑而停止：{source_root}"
+                )
+
             encoding = self.encoding_var.get().strip() or context.text_encoding
+            try:
+                codecs.lookup(encoding)
+            except LookupError as exc:
+                raise UIFHelperError(f"不支援的翻譯文件編碼：{encoding!r}") from exc
+
+            reverse, _ambiguous = build_reverse_mapping(pairs)
+            if not reverse:
+                raise UIFHelperError("沒有可用映射，無法替換翻譯文件。")
+
+            # 在備份前先完成輸出路徑檢查，避免路徑不合法卻留下誤導性的備份。
+            source_root = source_root.resolve()
+            output_root = output_root.resolve()
+            if source_root.is_file():
+                output_file = (
+                    output_root / source_root.name
+                    if output_root.exists() and output_root.is_dir()
+                    else output_root
+                )
+                _ensure_output_location(source_root, output_file)
+            elif source_root.is_dir():
+                _ensure_output_location(source_root, output_root)
+            else:
+                raise UIFHelperError(f"翻譯來源不是一般檔案或資料夾：{source_root}")
+
+            # 備份內容就是接下來傳給 replace_translation_files() 的同一份 pairs。
+            # 備份失敗會直接中止，不會先執行替換。
+            snapshot_path = save_mapping_snapshot(context.report_root, pairs)
+
             result = replace_translation_files(
-                Path(translation_text), Path(output_text), pairs, encoding
+                source_root, output_root, pairs, encoding
             )
+
             message = (
                 f"處理檔案：{result['files_total']}\n"
                 f"有替換的檔案：{result['files_changed']}\n"
                 f"替換字元總數：{result['replacements']}\n"
-                f"輸出位置：{result['output_root']}"
+                f"輸出位置：{result['output_root']}\n"
+                f"本次映射備份：{snapshot_path}"
             )
             if result["ambiguous_targets"]:
                 message += "\n\n以下目標字在 UIF 有多個來源，替換時採用第一個來源：\n" + "、".join(result["ambiguous_targets"])
@@ -1054,9 +1129,14 @@ class UIFCharHelperApp(ttk.Frame):
                 messagebox.showwarning("替換完成，但有警告", message, parent=self)
             else:
                 messagebox.showinfo("替換完成", message, parent=self)
-            self.status_var.set(f"替換完成：共替換 {result['replacements']} 個字元。")
-        except (UIFHelperError, OSError, UnicodeError, LookupError) as exc:
-            messagebox.showerror("替換失敗", str(exc), parent=self)
+            self.status_var.set(
+                f"替換完成：共替換 {result['replacements']} 個字元。映射備份：{snapshot_path.name}"
+            )
+        except (UIFHelperError, OSError, UnicodeError, LookupError, RuntimeError, ValueError) as exc:
+            error_message = str(exc)
+            if snapshot_path is not None:
+                error_message += f"\n\n本次映射已備份，替換未完成或發生錯誤：\n{snapshot_path}"
+            messagebox.showerror("替換失敗", error_message, parent=self)
 
 
 def run_gui() -> int:
@@ -1110,9 +1190,44 @@ def main(argv: list[str] | None = None) -> int:
         if args.translations:
             if not args.output:
                 parser.error("指定 --translations 時，也必須指定 --output。")
+
+            # CLI 替換也使用同一個備份流程，避免 GUI 與 CLI 行為不一致。
+            source_root = Path(args.translations).expanduser().absolute()
+            output_root = Path(args.output).expanduser().absolute()
+            if not source_root.exists():
+                raise UIFHelperError(f"翻譯來源不存在：{source_root}")
+            if _is_link(source_root):
+                raise UIFHelperError(f"翻譯來源本身是符號連結或 Junction：{source_root}")
+
+            encoding = args.encoding or context.text_encoding
+            try:
+                codecs.lookup(encoding)
+            except LookupError as exc:
+                raise UIFHelperError(f"不支援的翻譯文件編碼：{encoding!r}") from exc
+
+            reverse, _ambiguous = build_reverse_mapping(pairs)
+            if not reverse:
+                raise UIFHelperError("沒有可用映射，無法替換翻譯文件。")
+
+            source_root = source_root.resolve()
+            output_root = output_root.resolve()
+            if source_root.is_file():
+                output_file = (
+                    output_root / source_root.name
+                    if output_root.exists() and output_root.is_dir()
+                    else output_root
+                )
+                _ensure_output_location(source_root, output_file)
+            elif source_root.is_dir():
+                _ensure_output_location(source_root, output_root)
+            else:
+                raise UIFHelperError(f"翻譯來源不是一般檔案或資料夾：{source_root}")
+
+            snapshot_path = save_mapping_snapshot(context.report_root, pairs)
+            print(f"本次映射備份：{snapshot_path}")
+
             result = replace_translation_files(
-                Path(args.translations), Path(args.output), pairs,
-                args.encoding or context.text_encoding,
+                source_root, output_root, pairs, encoding
             )
             print(f"處理檔案：{result['files_total']}")
             print(f"有替換的檔案：{result['files_changed']}")
@@ -1129,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
             for error in result["errors"]:
                 print("警告：" + error, file=sys.stderr)
         return 0
-    except (UIFHelperError, OSError, UnicodeError, LookupError, ValueError) as exc:
+    except (UIFHelperError, OSError, UnicodeError, LookupError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
