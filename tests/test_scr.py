@@ -158,9 +158,9 @@ class MixedEncodingImportTests(unittest.TestCase):
             self.assertIn("JSON item 0", log)
             self.assertIn("'message'", log)
 
-            # 語法錯誤必須列出對應 JSON。
+            # 語法錯誤必須列出對應 JSON 及具體原因。
             self.assertIn("c_invalid_json.json", log)
-            self.assertIn("JSONDecodeError", log)
+            self.assertIn("invalid JSON in", log)
 
             # 缺少 JSON 的項目也要列出。
             self.assertIn("d_missing.txt", log)
