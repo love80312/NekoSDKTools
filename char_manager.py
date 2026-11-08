@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
+import tkinter.font as tkfont
 from typing import Any, Callable, Iterable, Iterator
 
 import scr as script_tool
@@ -1164,27 +1165,38 @@ class CharacterManagerFrame(ttk.Frame):
         search_entry.pack(side="left", padx=3)
         search_entry.bind("<KeyRelease>", lambda _event: self._refresh_candidate_tree())
         self.status_var = tk.StringVar(value="請選擇翻譯文件資料夾。")
-        ttk.Label(command_row, textvariable=self.status_var).pack(side="left", padx=10)
-
-        help_label = ttk.Label(
-            self,
-            text="常用字清單只排除來源候選，不影響翻譯統計或待替換目標。未指定原始腳本時，不會檢查原文占用。",
-            foreground="#666666",
+        self.status_label = ttk.Label(
+            command_row,
+            textvariable=self.status_var,
+            wraplength=520,
+            justify="left",
         )
-        help_label.grid(row=3, column=0, sticky="w", padx=8, pady=(0, 3))
+        self.status_label.pack(side="left", fill="x", expand=True, padx=10)
 
-        # 左側清單改為上下排列，右側保留較大的目標／來源字形預覽。
-        workspace = ttk.Panedwindow(self, orient="horizontal")
-        workspace.grid(row=4, column=0, sticky="nsew", padx=5, pady=4)
+        # 將主要選字區與映射清單分頁，避免在較矮的螢幕上擠壓 Treeview 列高。
+        self.workspace_tabs = ttk.Notebook(self)
+        self.workspace_tabs.grid(row=4, column=0, sticky="nsew", padx=5, pady=4)
+        workspace_page = ttk.Frame(self.workspace_tabs, padding=2)
+        mapping_page = ttk.Frame(self.workspace_tabs, padding=4)
+        self.mapping_page = mapping_page
+        self.workspace_tabs.add(workspace_page, text="字元選取／預覽")
+        self.workspace_tabs.add(mapping_page, text="本次工作映射")
+
+        # 左側清單上下排列，右側保留較大的目標／來源字形預覽。
+        workspace = ttk.Panedwindow(workspace_page, orient="horizontal")
+        self.workspace = workspace
+        workspace.pack(fill="both", expand=True)
         left_panel = ttk.Frame(workspace)
         right_panel = ttk.Frame(workspace)
         left_panel.columnconfigure(0, weight=1)
         left_panel.rowconfigure(0, weight=1)
-        left_panel.rowconfigure(1, weight=2)
+        left_panel.rowconfigure(1, weight=4)
         right_panel.columnconfigure(0, weight=1)
         right_panel.rowconfigure(0, weight=1)
-        workspace.add(left_panel, weight=1)
+        workspace.add(left_panel, weight=2)
         workspace.add(right_panel, weight=3)
+        workspace.pane(left_panel, weight=2)
+        workspace.pane(right_panel, weight=3)
 
         target_box = ttk.LabelFrame(left_panel, text="待替換目標字元（CP932 無法編碼）")
         target_box.grid(row=0, column=0, sticky="nsew", padx=(0, 3), pady=(0, 3))
@@ -1192,7 +1204,7 @@ class CharacterManagerFrame(ttk.Frame):
         target_box.columnconfigure(0, weight=1)
         self.target_tree = ttk.Treeview(
             target_box, columns=("count", "files", "unicode"),
-            show="tree headings", height=6, style="Glyph.Treeview",
+            show="tree headings", height=2, style="Glyph.Treeview",
         )
         self.target_tree.heading("#0", text="目標字元")
         self.target_tree.heading("count", text="次數")
@@ -1216,7 +1228,7 @@ class CharacterManagerFrame(ttk.Frame):
         candidate_box.columnconfigure(0, weight=1)
         self.candidate_tree = ttk.Treeview(
             candidate_box, columns=("unicode", "name", "bytes"),
-            show="tree headings", height=9, style="Glyph.Treeview",
+            show="tree headings", height=4, style="Glyph.Treeview",
         )
         self.candidate_tree.heading("#0", text="來源字元")
         self.candidate_tree.heading("unicode", text="Unicode")
@@ -1224,15 +1236,20 @@ class CharacterManagerFrame(ttk.Frame):
         self.candidate_tree.heading("bytes", text="CP932 位元組")
         self.candidate_tree.column("#0", width=72, minwidth=62, anchor="center")
         self.candidate_tree.column("unicode", width=94, anchor="center")
-        self.candidate_tree.column("name", width=190)
-        self.candidate_tree.column("bytes", width=88, anchor="center")
+        self.candidate_tree.column("name", width=260, minwidth=130, stretch=True)
+        self.candidate_tree.column("bytes", width=100, anchor="center")
         self.candidate_tree.grid(row=0, column=0, sticky="nsew")
         candidate_scroll = ttk.Scrollbar(candidate_box, orient="vertical", command=self.candidate_tree.yview)
         candidate_scroll.grid(row=0, column=1, sticky="ns")
-        self.candidate_tree.configure(yscrollcommand=candidate_scroll.set)
+        candidate_xscroll = ttk.Scrollbar(candidate_box, orient="horizontal", command=self.candidate_tree.xview)
+        candidate_xscroll.grid(row=1, column=0, sticky="ew")
+        self.candidate_tree.configure(
+            yscrollcommand=candidate_scroll.set,
+            xscrollcommand=candidate_xscroll.set,
+        )
         ttk.Button(
             candidate_box, text="複製選取來源字", command=lambda: self._copy_tree_character(self.candidate_tree)
-        ).grid(row=1, column=0, sticky="ew", padx=4, pady=3)
+        ).grid(row=2, column=0, sticky="ew", padx=4, pady=3)
 
         preview = ttk.Frame(right_panel)
         preview.grid(row=0, column=0, sticky="nsew")
@@ -1273,12 +1290,24 @@ class CharacterManagerFrame(ttk.Frame):
         self.resume_button = ttk.Button(action_row, text="繼續上次工作…", command=self._resume_last_work, state="disabled")
         self.resume_button.pack(side="right", padx=3)
 
-        mapping_box = ttk.LabelFrame(self, text="本次工作映射（來源 → 目標）")
-        mapping_box.grid(row=6, column=0, sticky="ew", padx=5, pady=4)
+        mapping_page.columnconfigure(0, weight=1)
+        mapping_page.rowconfigure(1, weight=1)
+        self.summary_var = tk.StringVar(value="映射尚未建立。")
+        self.summary_label = ttk.Label(
+            mapping_page,
+            textvariable=self.summary_var,
+            wraplength=1000,
+            justify="left",
+        )
+        self.summary_label.grid(row=0, column=0, sticky="ew", padx=5, pady=(4, 2))
+
+        mapping_box = ttk.LabelFrame(mapping_page, text="來源 → 目標")
+        mapping_box.grid(row=1, column=0, sticky="nsew", padx=3, pady=3)
         mapping_box.columnconfigure(0, weight=1)
+        mapping_box.rowconfigure(0, weight=1)
         self.mapping_tree = ttk.Treeview(
             mapping_box, columns=("target", "source_unicode", "target_unicode"),
-            show="tree headings", height=5, style="Mapping.Treeview",
+            show="tree headings", height=8, style="Mapping.Treeview",
         )
         self.mapping_tree.heading("#0", text="來源字元")
         self.mapping_tree.heading("target", text="目標字元")
@@ -1288,7 +1317,7 @@ class CharacterManagerFrame(ttk.Frame):
         self.mapping_tree.column("target", width=120, anchor="center")
         self.mapping_tree.column("source_unicode", width=120, anchor="center")
         self.mapping_tree.column("target_unicode", width=120, anchor="center")
-        self.mapping_tree.grid(row=0, column=0, sticky="ew")
+        self.mapping_tree.grid(row=0, column=0, sticky="nsew")
         mapping_scroll = ttk.Scrollbar(mapping_box, orient="vertical", command=self.mapping_tree.yview)
         mapping_scroll.grid(row=0, column=1, sticky="ns")
         self.mapping_tree.configure(yscrollcommand=mapping_scroll.set)
@@ -1302,13 +1331,49 @@ class CharacterManagerFrame(ttk.Frame):
             tree.bind("<Button-3>", lambda event, current=tree: self._show_tree_menu(event, current))
 
         style = ttk.Style(self)
-        style.configure("Glyph.Treeview", font=("Microsoft JhengHei UI", 18), rowheight=35)
-        style.configure("Mapping.Treeview", font=("Microsoft JhengHei UI", 20), rowheight=42)
-        style.configure("Treeview.Heading", font=("Microsoft JhengHei UI", 10, "bold"))
+        glyph_font = ("Microsoft JhengHei UI", 18)
+        mapping_font = ("Microsoft JhengHei UI", 20)
+        heading_font = ("Microsoft JhengHei UI", 10, "bold")
 
-        self.summary_var = tk.StringVar(value="映射尚未建立。")
-        ttk.Label(self, textvariable=self.summary_var).grid(row=7, column=0, sticky="w", padx=8, pady=4)
+        # 以 Tk 實際字型行高計算列高，避免 Windows DPI 縮放時裁掉中文字上下緣。
+        glyph_line_height = tkfont.Font(self, font=glyph_font).metrics("linespace")
+        mapping_line_height = tkfont.Font(self, font=mapping_font).metrics("linespace")
+        style.configure(
+            "Glyph.Treeview",
+            font=glyph_font,
+            rowheight=max(42, glyph_line_height + 14),
+        )
+        style.configure(
+            "Mapping.Treeview",
+            font=mapping_font,
+            rowheight=max(48, mapping_line_height + 16),
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=heading_font,
+            padding=(7, 5),
+        )
+
+        # 摘要改放在映射分頁，不再佔用主要選字區的垂直高度。
+        self.bind("<Configure>", self._resize_wrapped_labels, add="+")
+        self.after_idle(self._set_workspace_sash)
         self._update_previews()
+
+    def _resize_wrapped_labels(self, event: tk.Event | None = None) -> None:
+        """依頁面寬度調整狀態列換行寬度，避免掃描摘要被視窗邊界裁掉。"""
+        width = max(280, min(680, self.winfo_width() - 430))
+        if hasattr(self, "status_label"):
+            self.status_label.configure(wraplength=width)
+
+    def _set_workspace_sash(self) -> None:
+        """初始配置給候選清單足夠寬度，保留右側預覽空間。"""
+        try:
+            width = self.workspace.winfo_width()
+            if width > 700:
+                # 左側約 43%，比舊版 25% 更能完整顯示 Unicode 欄位。
+                self.workspace.sashpos(0, int(width * 0.43))
+        except (tk.TclError, AttributeError):
+            pass
 
     def _copy_to_clipboard(self, value: str) -> bool:
         if not value:
@@ -1643,11 +1708,16 @@ class CharacterManagerFrame(ttk.Frame):
     def _update_summary(self) -> None:
         if self.result is None:
             self.summary_var.set("映射尚未建立。")
-            return
-        self.summary_var.set(
-            f"目前 {len(self.mapping)} 組映射；尚未映射 {len(self._current_missing_targets())} 個目標字元。"
-            "匯出檔只有兩行：第一行來源字元、第二行目標字元。"
-        )
+        else:
+            self.summary_var.set(
+                f"目前 {len(self.mapping)} 組映射；尚未映射 {len(self._current_missing_targets())} 個目標字元。"
+                "匯出檔只有兩行：第一行來源字元、第二行目標字元。"
+            )
+        if hasattr(self, "workspace_tabs") and hasattr(self, "mapping_page"):
+            self.workspace_tabs.tab(
+                self.mapping_page,
+                text=f"本次工作映射（{len(self.mapping)}）",
+            )
 
     def _add_pair(self) -> None:
         if self.result is None:
