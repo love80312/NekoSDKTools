@@ -1103,11 +1103,20 @@ def load_translation(path: Path) -> list[dict[str, object]]:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise ScriptError(f"invalid JSON in {path}: {exc}") from exc
+
     if not isinstance(value, list):
         raise ScriptError(f"JSON root must be an array: {path}")
-    if not all(isinstance(item, dict) for item in value):
-        raise ScriptError(f"every JSON array item must be an object: {path}")
-    return value
+
+    items: list[dict[str, object]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ScriptError(
+                f"JSON item {index} in {path} must be an object; "
+                f"got {type(item).__name__}"
+            )
+        items.append(item)
+
+    return items
 
 
 def import_file(

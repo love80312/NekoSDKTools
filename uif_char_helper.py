@@ -888,11 +888,40 @@ class UIFCharHelperApp(ttk.Frame):
         scroll.grid(row=0, column=1, sticky="ns")
         self.pair_tree.configure(yscrollcommand=scroll.set)
 
-        output_box = ttk.LabelFrame(self, text="完整兩行映射預覽（第一行 source_characters、第二行 target_characters）")
+        output_box = ttk.LabelFrame(
+            self,
+            text="完整兩行映射預覽（第一行 source_characters、第二行 target_characters）",
+        )
         output_box.grid(row=4, column=0, sticky="ew", pady=4)
         output_box.columnconfigure(0, weight=1)
-        self.output_text = tk.Text(output_box, height=4, wrap="none", font=("Consolas", 12))
-        self.output_text.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        self.output_text = tk.Text(
+            output_box,
+            height=4,
+            wrap="none",
+            font=("Consolas", 12),
+        )
+        self.output_text.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=4,
+            pady=4,
+        )
+        self.output_scrollbar = ttk.Scrollbar(
+            output_box,
+            orient="horizontal",
+            command=self.output_text.xview,
+        )
+        self.output_scrollbar.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=4,
+            pady=(0, 4),
+        )
+        self.output_text.configure(
+            xscrollcommand=self.output_scrollbar.set,
+        )
 
         replace_box = ttk.LabelFrame(self, text="翻譯文件替換（另存新資料夾，不覆寫原始檔）")
         replace_box.grid(row=5, column=0, sticky="nsew", pady=4)
