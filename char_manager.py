@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import queue
+import stat
 import sys
 import tempfile
 import threading
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import scr as script_tool
 
@@ -401,18 +402,32 @@ def _file_sha256(path: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _is_symlink_or_junction(path: Path) -> bool:
-    """判斷符號連結及 Windows Junction；不追蹤連結目標。"""
+    """判斷符號連結及 Windows Junction；不追蹤連結目標。
+
+    Python 3.12+ 可直接使用 Path.is_junction()。舊版 Windows Python
+    則以 lstat() 的 FILE_ATTRIBUTE_REPARSE_POINT 作保守判斷。
+    """
     try:
         if path.is_symlink():
             return True
         is_junction = getattr(path, "is_junction", None)
-        return bool(is_junction()) if callable(is_junction) else False
+        if callable(is_junction):
+            return bool(is_junction())
+        if os.name == "nt":
+            attributes = getattr(path.lstat(), "st_file_attributes", 0)
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            return bool(attributes & reparse_flag)
+        return False
     except OSError:
+        # 無法確認路徑型態時採取保守策略：不讀取並回報掃描錯誤。
         return True
 
 
-def iter_text_files(root: Path) -> Iterator[Path]:
-    """列舉翻譯文件；符號連結及目錄連結會作為警示項目回傳。"""
+def iter_text_files(
+    root: Path,
+    on_error: Callable[[OSError], None] | None = None,
+) -> Iterator[Path]:
+    """列舉翻譯文件；連結及列舉錯誤交由呼叫端記錄，不追蹤連結目標。"""
     root = Path(root)
     if _is_symlink_or_junction(root):
         if root.is_dir() or root.suffix.lower() in TRANSLATION_EXTENSIONS:
@@ -423,8 +438,10 @@ def iter_text_files(root: Path) -> Iterator[Path]:
             yield root
         return
 
-    # 不跟隨目錄符號連結；Windows Junction 亦明確從遞迴清單移除。
-    for current, dirnames, filenames in os.walk(root, followlinks=False):
+    # os.walk 預設忽略 scandir 錯誤；必須透過 onerror 將錯誤交回呼叫端。
+    for current, dirnames, filenames in os.walk(
+        root, topdown=True, onerror=on_error, followlinks=False
+    ):
         current_path = Path(current)
         dirnames.sort(key=str.casefold)
         filenames.sort(key=str.casefold)
@@ -441,7 +458,11 @@ def iter_text_files(root: Path) -> Iterator[Path]:
             path = current_path / filename
             if path.suffix.lower() not in TRANSLATION_EXTENSIONS:
                 continue
-            if _is_symlink_or_junction(path) or path.is_file():
+            if _is_symlink_or_junction(path):
+                yield path
+            else:
+                # os.walk 已將這些項目列在 filenames；直接交給讀取層，
+                # 讓權限／I/O 錯誤可被記錄，而不是因 is_file() 回傳 False 被漏掉。
                 yield path
 
 
@@ -487,7 +508,15 @@ def scan_translation_root(
     stats: dict[str, CharacterStat] = {}
     scanned = 0
     errors: list[str] = []
-    for path in iter_text_files(root):
+
+    def record_walk_error(exc: OSError) -> None:
+        location = getattr(exc, "filename", None) or root
+        errors.append(
+            f"翻譯資料：無法列舉資料夾：{location}："
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    for path in iter_text_files(root, on_error=record_walk_error):
         if _is_symlink_or_junction(path):
             link_kind = "目錄" if path.is_dir() else "檔案"
             errors.append(
@@ -511,9 +540,9 @@ def scan_source_root(
     command_encoding: str = "cp932",
     dialogue_encoding: str = "auto",
 ) -> tuple[dict[str, CharacterStat], int, list[str]]:
-    """重用 scr.py 解析 ADVSCRIPT2；統計可辨識的名稱、對話及選項。"""
-    root = root.expanduser().resolve()
-    if not root.exists():
+    """重用 scr.py 解析 ADVSCRIPT2；任何未讀取路徑都會標記掃描不完整。"""
+    root = root.expanduser().absolute()
+    if not _is_symlink_or_junction(root) and not root.exists():
         raise CharacterManagerError(f"原始遊戲腳本位置不存在：{root}")
     try:
         command_codec = script_tool.validate_encoding(command_encoding)
@@ -521,16 +550,64 @@ def scan_source_root(
     except Exception as exc:
         raise CharacterManagerError(f"原始腳本編碼設定錯誤：{exc}") from exc
 
-    if root.is_file():
-        files = [root]
-    else:
-        files = sorted(
-            (path for path in root.rglob("*") if path.is_file() and not path.is_symlink()),
-            key=lambda item: item.as_posix().casefold(),
-        )
     stats: dict[str, CharacterStat] = {}
     scanned = 0
     errors: list[str] = []
+
+    if _is_symlink_or_junction(root):
+        errors.append(
+            f"原始腳本：指定的根路徑是符號連結／Junction，"
+            f"為避免追蹤至連結目標而未讀取：{root}"
+        )
+        return stats, scanned, errors
+
+    if root.is_file():
+        files = [root]
+    elif root.is_dir():
+        files: list[Path] = []
+
+        def record_walk_error(exc: OSError) -> None:
+            location = getattr(exc, "filename", None) or root
+            errors.append(
+                f"原始腳本：無法列舉資料夾：{location}："
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        for current, dirnames, filenames in os.walk(
+            root, topdown=True, onerror=record_walk_error, followlinks=False
+        ):
+            current_path = Path(current)
+            dirnames.sort(key=str.casefold)
+            filenames.sort(key=str.casefold)
+
+            retained_directories: list[str] = []
+            for dirname in dirnames:
+                path = current_path / dirname
+                if _is_symlink_or_junction(path):
+                    errors.append(
+                        f"原始腳本：偵測到目錄符號連結／Junction，"
+                        f"為避免追蹤至連結目標而未讀取：{path}"
+                    )
+                else:
+                    retained_directories.append(dirname)
+            dirnames[:] = retained_directories
+
+            for filename in filenames:
+                path = current_path / filename
+                if _is_symlink_or_junction(path):
+                    errors.append(
+                        f"原始腳本：偵測到檔案符號連結／Junction，"
+                        f"為避免追蹤至連結目標而未讀取：{path}"
+                    )
+                    continue
+                # os.walk 已將此項目列在 filenames；不要先以 is_file() 篩掉
+                # 無法 stat 的檔案，後續 open() 失敗時會由檔案錯誤處理記錄。
+                files.append(path)
+        files.sort(key=lambda item: item.as_posix().casefold())
+    else:
+        errors.append(f"原始腳本：指定位置不是檔案或資料夾：{root}")
+        return stats, scanned, errors
+
     for path in files:
         try:
             with path.open("rb") as handle:
@@ -700,7 +777,7 @@ def validate_work_mapping(result: ScanResult, mapping: dict[str, str]) -> None:
 
 # ---------------------------------------------------------------------------
 # 報表與掃描主流程
-# ---------------------------------------------------------------------------
+
 
 def _write_csv(path: Path, headers: list[str], rows: Iterable[Iterable[Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -887,15 +964,15 @@ def scan_project(
     candidate_filters: dict[str, bool] | None = None,
 ) -> ScanResult:
     """掃描翻譯文件與選填的已解包 ADVSCRIPT2 腳本。"""
-    translation_root = translation_root.expanduser().resolve()
+    translation_root = translation_root.expanduser().absolute()
     if not translation_root.is_dir():
         raise CharacterManagerError(f"翻譯來源必須是存在的資料夾：{translation_root}")
     text_encoding = validate_text_encoding(text_encoding)
 
     resolved_source: Path | None = None
     if source_root is not None and str(source_root).strip():
-        resolved_source = source_root.expanduser().resolve()
-        if not resolved_source.exists():
+        resolved_source = source_root.expanduser().absolute()
+        if not _is_symlink_or_junction(resolved_source) and not resolved_source.exists():
             raise CharacterManagerError(f"原始遊戲腳本位置不存在：{resolved_source}")
 
     if report_root is None:
@@ -1658,7 +1735,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--dialogue-encoding", default="auto", help="原始腳本對話編碼")
     scan.add_argument("--output", help="報表輸出資料夾")
     scan.add_argument("--settings", default=str(DEFAULT_SETTINGS), help="char_manager.json 路徑")
-    scan.add_argument("--text-encoding", default="utf-8-sig", help="TXT／CSV 等翻譯文件編碼")
+    scan.add_argument("--text-encoding", default="utf-8-sig", help="TXT／CSV 等翻譯文字編碼")
     scan.set_defaults(func=_command_scan)
     return parser
 

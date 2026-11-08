@@ -312,6 +312,7 @@ def write_script(script: Script, path: Path) -> None:
         if temp_path.exists():
             temp_path.unlink()
 
+
 def decode_record_text(
     record: Record, encoding: str, context: str
 ) -> tuple[str, list[str]]:
@@ -778,16 +779,24 @@ def import_items(
                 record_changed = True
 
             if record_changed:
-                main_text = decode_field(
-                    record.main, encoding, f"{context} main"
-                )
-                new_main = make_text_main(
-                    name, old_name, message, old_message, main_text
-                )
-                if new_main is not None:
-                    record.main = encode_field(
-                        new_main, encoding, record.main.endswith(b"\0")
+                # In mixed CP932/GBK scripts, the main field may contain bytes
+                # that are intentionally not decodable with the command codec.
+                # Update the dialogue argument regardless; preserve such main
+                # bytes verbatim unless they can be decoded safely.
+                try:
+                    main_text = decode_field(
+                        record.main, encoding, f"{context} main"
                     )
+                except ScriptError:
+                    main_text = None
+                if main_text is not None:
+                    new_main = make_text_main(
+                        name, old_name, message, old_message, main_text
+                    )
+                    if new_main is not None:
+                        record.main = encode_field(
+                            new_main, encoding, record.main.endswith(b"\0")
+                        )
             item_index += 1
 
         else:
@@ -1088,6 +1097,7 @@ def export_file(
 
     print(f"exported {len(items)} item(s): {input_path} -> {output_path}")
 
+
 def load_translation(path: Path) -> list[dict[str, object]]:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -1135,6 +1145,7 @@ def iter_files(root: Path) -> list[Path]:
         if path.is_file():
             files.append(path)
     return sorted(files, key=lambda p: p.as_posix().casefold())
+
 
 def export_path(
     input_path: Path,
@@ -1230,6 +1241,7 @@ def export_path(
     print(
         f"finished: exported {len(scripts)} valid ADVSCRIPT2 script(s)"
     )
+
 
 def import_path(
     original_path: Path,
@@ -1360,6 +1372,7 @@ def import_path(
         f"finished: imported {len(scripts)} script(s), "
         f"copied {len(non_scripts)} non-script file(s)"
     )
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
