@@ -400,16 +400,49 @@ def _file_sha256(path: Path) -> str | None:
 # 翻譯文件與原始腳本掃描
 # ---------------------------------------------------------------------------
 
+def _is_symlink_or_junction(path: Path) -> bool:
+    """判斷符號連結及 Windows Junction；不追蹤連結目標。"""
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        return bool(is_junction()) if callable(is_junction) else False
+    except OSError:
+        return True
+
+
 def iter_text_files(root: Path) -> Iterator[Path]:
+    """列舉翻譯文件；符號連結及目錄連結會作為警示項目回傳。"""
+    root = Path(root)
+    if _is_symlink_or_junction(root):
+        if root.is_dir() or root.suffix.lower() in TRANSLATION_EXTENSIONS:
+            yield root
+        return
     if root.is_file():
         if root.suffix.lower() in TRANSLATION_EXTENSIONS:
             yield root
         return
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-        if path.is_symlink():
-            continue
-        if path.is_file() and path.suffix.lower() in TRANSLATION_EXTENSIONS:
-            yield path
+
+    # 不跟隨目錄符號連結；Windows Junction 亦明確從遞迴清單移除。
+    for current, dirnames, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        dirnames.sort(key=str.casefold)
+        filenames.sort(key=str.casefold)
+        retained_directories: list[str] = []
+        for dirname in dirnames:
+            path = current_path / dirname
+            if _is_symlink_or_junction(path):
+                yield path
+            else:
+                retained_directories.append(dirname)
+        dirnames[:] = retained_directories
+
+        for filename in filenames:
+            path = current_path / filename
+            if path.suffix.lower() not in TRANSLATION_EXTENSIONS:
+                continue
+            if _is_symlink_or_junction(path) or path.is_file():
+                yield path
 
 
 def _collect_json_strings(value: Any) -> Iterator[str]:
@@ -455,6 +488,13 @@ def scan_translation_root(
     scanned = 0
     errors: list[str] = []
     for path in iter_text_files(root):
+        if _is_symlink_or_junction(path):
+            link_kind = "目錄" if path.is_dir() else "檔案"
+            errors.append(
+                f"翻譯資料：偵測到{link_kind}符號連結／Junction，"
+                f"為避免追蹤至連結目標而未讀取：{path}"
+            )
+            continue
         try:
             strings = _load_text_document(path, text_encoding)
             scanned += 1
@@ -882,7 +922,7 @@ def scan_project(
         for key in ("zh_punctuation", "ja_punctuation", "common_symbols")
     }
     stats, scanned, errors = scan_translation_root(translation_root, text_encoding)
-    if scanned == 0:
+    if scanned == 0 and not errors:
         raise CharacterManagerError("指定位置沒有找到支援的翻譯文件（JSON／TXT／CSV／TSV／PO／FTL 等）。")
 
     source_stats: dict[str, CharacterStat] = {}
@@ -1144,6 +1184,10 @@ class CharacterManagerFrame(ttk.Frame):
             self._save_settings_from_ui()
         except (OSError, CharacterManagerError) as exc:
             messagebox.showerror("設定儲存失敗", str(exc), parent=self)
+
+        # 候選排除開關也是本次工作狀態；立即同步草稿並保留現有映射。
+        if self.result is not None:
+            self._save_mapping_draft(show_message=False)
 
     def _save_settings_from_ui(self) -> None:
         settings = load_manager_settings(self.settings_path)
