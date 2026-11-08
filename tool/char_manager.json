@@ -1,6 +1,14 @@
 {
-  "version": 1,
+  "version": 2,
   "excluded_source_characters": [],
   "excluded_target_characters": [],
-  "text_encoding": "utf-8"
+  "text_encoding": "utf-8",
+  "source_command_encoding": "cp932",
+  "source_dialogue_encoding": "auto",
+  "candidate_filters": {
+    "moe_4808": true,
+    "zh_punctuation": true,
+    "ja_punctuation": true,
+    "common_symbols": true
+  }
 }
