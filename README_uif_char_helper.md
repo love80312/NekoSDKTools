@@ -1,6 +1,6 @@
 # UIF 字元配對與翻譯文件替換工具
 
-`uif_char_helper.py` 是獨立輔助工具，不匯入 `char_manager.py`，也不會自動讀取 GitHub 專案內的 `tool/uif_config.json`。
+`uif_char_helper.py` 是 UIF 輔助模組，不匯入 `char_manager.py`，也不會自動讀取專案內的 `tool/uif_config.json`。使用 `GUI_with_uif.py` 啟動整合主介面時，它會出現在主視窗 Notebook 中、緊接「字元管理」右側的同層級「UIF 輔助工具」分頁；也可保留原本的獨立啟動方式。
 
 ## 啟動
 
@@ -8,7 +8,7 @@
 py -3 uif_char_helper.py
 ```
 
-工具會開啟獨立 GUI。請分別選取：
+單獨啟動時會開啟獨立 GUI。整合至主介面時，請改執行 `py -3 GUI_with_uif.py`；「UIF 輔助工具」會是主視窗的獨立分頁，排列在「字元管理」右側。兩種方式使用相同控制項與處理流程。請分別選取：
 
 1. 遊戲資料夾內實際使用的 `uif_config.json`。
 2. `char_manager.py` 掃描後產生的 `*_char_report` 資料夾。
@@ -77,7 +77,7 @@ py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\T
 
 ## 與 char_manager.py 的關係
 
-`char_manager.py` 仍只負責掃描、候選篩選、人工配對及報表輸出，不依賴本工具，也不讀取 UIF。
+`char_manager.py` 的掃描、候選篩選、人工配對及報表邏輯仍不讀取或修改 UIF；整合主介面只是在「字元管理」右側新增本工具的獨立分頁。兩套資料仍各自獨立，UIF 既有映射不會寫回 `char_manager` 工作草稿。
 
 這版的 CP932 殘留檢查是替換後的提示功能：它不會替使用者自動建立新映射，也不會強制重編碼輸出檔。請依提示回到字元管理報表處理未配對字元。
 

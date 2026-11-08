@@ -1,6 +1,6 @@
 # NekoSDKTools（個人優化版）
 
-用於 NekoSDK／Waffle 遊戲資源的個人工具組，包含 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本、BMP+ALP 圖像，以及 CP932 字元統計、替代字元管理與獨立 UIF 輔助工具。
+用於 NekoSDK／Waffle 遊戲資源的個人工具組，包含 NEKOPACK4A／NEKOPACK4S 封包、NEKOSDK_ADVSCRIPT2 腳本、BMP+ALP 圖像，以及 CP932 字元統計、替代字元管理與整合式 UIF 輔助工具。
 
 > 本專案不是通用的 PAK／TXT 解包工具。只有符合對應格式的檔案才能使用相關功能。修改後資源仍須在實際遊戲中測試。
 
@@ -8,12 +8,13 @@
 
 | 檔案／資料夾 | 用途 |
 |---|---|
-| `GUI.py` | Tkinter 圖形介面，整合 PAK、腳本、BMP／ALP 及字元管理 |
+| `GUI.py` | 基礎 Tkinter 主介面，整合 PAK、腳本、BMP／ALP 及字元管理 |
+| `GUI_with_uif.py` | 整合版主介面；在「字元管理」右側新增同層級的「UIF 輔助工具」分頁 |
 | `pak.py` | 解包 NEKOPACK4A／NEKOPACK4S，並可重包成 4A 或 4S |
 | `scr.py` | 解析 NEKOSDK_ADVSCRIPT2，將可辨識的對話／選項匯出為 UTF-8 JSON，再匯入修改內容 |
 | `bmp_alp.py` | BMP+ALP 與一般圖片之間的合併／拆分工具 |
-| `char_manager.py` | CP932 字元統計、候選排除、映射工作區及兩行替換字串匯出 |
-| `uif_char_helper.py` | 獨立讀取遊戲外部 UIF、合併既有／人工映射、輸出兩行字串及另存翻譯文件替換結果 |
+| `char_manager.py` | CP932 字元統計、候選排除、映射工作區及字元管理介面 |
+| `uif_char_helper.py` | UIF 輔助分頁的功能核心；由 `GUI_with_uif.py` 嵌入，也可獨立啟動 |
 | `tool/常用字.txt` | 使用者自訂的常用字排除清單 |
 | `tool/char_manager.json` | 字元管理設定、人工排除及候選排除開關 |
 | `tool/char_candidate_exclusions.json` | 中文／日文標點、常用符號及自訂排除字元 |
@@ -34,13 +35,15 @@
 py -3 -m pip install -r requirements.txt
 ```
 
-啟動整合圖形介面：
+啟動包含 UIF 同層級分頁的整合圖形介面：
 
 ```bat
-py -3 GUI.py
+py -3 GUI_with_uif.py
 ```
 
-`GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` 請放在同一個資料夾。字元管理功能直接由 `GUI.py` 載入 `char_manager.py`，不需要另外啟動第二套 GUI。`uif_char_helper.py` 是獨立工具，不會由 `GUI.py` 自動載入。
+`GUI_with_uif.py` 會沿用 `GUI.py` 的主視窗，在「字元管理」右側新增獨立的「UIF 輔助工具」分頁；兩者是主視窗 Notebook 的同層級分頁，不是字元管理內的子分頁。`GUI.py` 仍可單獨啟動原本的基本介面。
+
+`GUI.py`、`GUI_with_uif.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py`、`uif_char_helper.py` 請放在同一個資料夾。UIF 輔助工具仍可透過 `py -3 uif_char_helper.py` 獨立啟動；整合版與獨立版共用同一套 UIF 功能，不會自動讀取或修改任何 UIF 設定。
 
 ---
 
@@ -218,7 +221,7 @@ py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 
 ## 4. CP932 字元統計與替代字元管理
 
-`char_manager.py` 可獨立執行，也由 `GUI.py` 內的「字元管理」頁籤呼叫。此功能統計翻譯文件中的漢字、標點及符號，找出 CP932 無法編碼的目標字元，再從 CP932 字形目錄建立替代來源配對。
+`char_manager.py` 可獨立執行，也由 `GUI.py`／`GUI_with_uif.py` 內的「字元管理」頁籤呼叫。此功能統計翻譯文件中的漢字、標點及符號，找出 CP932 無法編碼的目標字元，再從 CP932 字形目錄建立替代來源配對。
 
 ### 4.1 掃描來源
 
@@ -253,7 +256,7 @@ py -3 bmp_alp.py -c "D:\Game\images" "D:\Game\bmp_alp"
 
 ### 4.3 GUI 操作
 
-1. 開啟 `GUI.py`，切換到「字元管理」頁籤。
+1. 開啟 `GUI_with_uif.py`，切換到「字元管理」頁籤。
 2. 選擇翻譯文件資料夾。
 3. 視需要選擇已解包的原始遊戲腳本資料夾。
 4. 設定翻譯文字、原始指令及對話編碼。
@@ -321,7 +324,7 @@ py -3 char_manager.py scan --translations "D:\Game\translation_json" --source "D
 
 ## 5. UIF 字元配對與翻譯文件替換
 
-`uif_char_helper.py` 是獨立工具，不會由 `GUI.py` 自動載入，也不會匯入 `char_manager.py`。其用途是將字元管理器輸出的人工映射、遊戲現有 UIF 映射及本次自動配對整合，產生可自行貼入 UIF 的完整兩行字串；另外也能將翻譯文件中的目標字替換成對應來源字，另存至新資料夾。
+`uif_char_helper.py` 提供 UIF 輔助功能。`GUI_with_uif.py` 會在主 Notebook 中、緊鄰「字元管理」右側加入「UIF 輔助工具」同層級分頁；也可單獨執行 `py -3 uif_char_helper.py`。其用途是將字元管理器輸出的人工映射、遊戲現有 UIF 映射及本次自動配對整合，產生可自行貼入 UIF 的完整兩行字串；另外也能將翻譯文件中的目標字替換成對應來源字，另存至新資料夾。
 
 ### 5.1 啟動與讀取
 
@@ -391,8 +394,8 @@ py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\T
 
 | 檔案／資料夾 | 判定 | 說明 |
 |---|---|---|
-| `GUI.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` | 必要 | 各主功能程式 |
-| `uif_char_helper.py` | 獨立工具 | 需要 UIF 映射整理或翻譯文件替換時使用 |
+| `GUI.py`、`GUI_with_uif.py`、`pak.py`、`scr.py`、`bmp_alp.py`、`char_manager.py` | 必要 | 基礎主介面、整合版主介面及各主功能程式 |
+| `uif_char_helper.py` | GUI 整合／可獨立啟動 | 需要整理 UIF 映射或替換翻譯文件時使用 |
 | `char_manager_README.md`、`README_uif_char_helper.md` | 建議保留 | 兩個字元工具的詳細操作文件 |
 | `tool/常用字.txt` | 必要 | 使用者自訂的常用字清單 |
 | `tool/char_manager.json` | 建議保留 | 人工排除及編碼設定 |
