@@ -1,73 +1,113 @@
 # NekoSDKTools 字元管理工具
 
-`char_manager.py` 是獨立工具模組，也包含可嵌入 `GUI.py` 的 `CharacterManagerFrame`。僅使用 Python 標準函式庫，需求 Python 3.10+。
+char_manager.py 是獨立的 CP932 字元統計與 UIF 替代字元管理工具，也提供 GUI.py 使用的 CharacterManagerFrame。使用 Python 3.10 以上版本，僅使用 Python 標準函式庫。
 
-## GUI 整合
+## 功能與限制
 
-請參考 `GUI_整合修改.txt`，在 `GUI.py` 匯入 `CharacterManagerFrame` 並新增「字元管理」頁籤。無須另做一套完整 GUI。
+本工具掃描翻譯文件，統計其中的漢字、標點及符號，列出 CP932 無法編碼的目標字元，並提供 CP932 安全候選供手動建立替代映射。
 
-## GUI 操作流程
+**目前版本只掃描翻譯文件，不需要也不會掃描原始遊戲腳本。** 因此候選來源只保證未出現在本次翻譯文件、既有映射及人工排除清單中；使用前仍須自行確認原始遊戲文字沒有使用候選字元。
 
-1. 選擇翻譯 JSON／TXT 資料夾。
-2. 選擇原始遊戲腳本資料夾。ADVSCRIPT2 檔案會交給同目錄的 `scr.py` 解析。
+支援副檔名：
+
+- JSON、TXT、CSV、TSV
+- PO、POT、FTL
+- INI、XML、HTML、HTM
+- Markdown、YAML、YML
+
+JSON 只統計值中的字串，不統計欄位名稱／鍵。其他格式依指定文字編碼讀取。統計會排除英文、日文假名、數字及空白，保留漢字與 Unicode 標點／符號。
+
+## GUI 操作
+
+1. 啟動 GUI.py，開啟「字元管理」頁籤。
+2. 選擇翻譯文件資料夾，指定 TXT／CSV 等文字文件的編碼。
 3. 按「開始掃描與統計」。
-4. 左側選擇待替換中文字，右側選擇來源候選字元，按「建立配對」。
-5. 不想使用的來源候選可選取後按「排除選取來源字元」。排除清單會存入 `tool/char_manager.json`。
-6. 按「套用至 uif_config.json」後，程式會先建立 `tool/uif_config.json.bak`，再更新現有 `character_substitution` 的兩個字串。
+4. 在目標字元清單選取 CP932 無法編碼的字元，再從 CP932 來源候選清單選取替代字元，建立映射。
+5. 不適合使用的候選字元可加入人工排除清單；排除狀態保存於 tool/char_manager.json。
+6. 可保存工作草稿、繼續上次工作、手動載入 UIF 既有映射或匯出兩行替換字串。
+7. 按「套用至 uif_config.json」後，程式會重新掃描翻譯文件、驗證新來源字元及映射衝突，要求使用者確認，再更新 UIF 設定。
+
+套用 UIF 前會建立原設定的 .bak 備份。更新後應重新啟動遊戲，使 UIF 重新載入設定。
 
 ## 獨立命令列掃描
 
 ```bat
-python char_manager.py scan --translations "D:\Game\translation_json" --source "D:\Game\original_scripts"
+py -3 char_manager.py scan --translations "D:\Game\translation_json"
 ```
 
 可選參數：
 
-```text
---output              報表輸出資料夾
---config              UIF uif_config.json 路徑
---settings            char_manager.json 路徑
---text-encoding       TXT／CSV 等翻譯文檔編碼，預設 utf-8-sig
---command-encoding    ADVSCRIPT2 指令／場景編碼，預設 cp932
---dialogue-encoding   ADVSCRIPT2 對話編碼，預設 auto
-```
+| 參數 | 說明 | 預設值 |
+|---|---|---|
+| --output | 報表輸出資料夾 | 翻譯資料夾旁的 *_char_report |
+| --settings | char_manager.json 路徑 | tool/char_manager.json |
+| --text-encoding | TXT／CSV 等翻譯文件編碼 | utf-8-sig |
 
-## 獨立套用 CSV
-
-掃描後，開啟報表資料夾的 `mapping_template.csv`，在「來源候選字元（自行填入）」欄位填入對應的 CP932 替代來源字元，儲存後執行：
+範例：
 
 ```bat
-python char_manager.py apply --mapping "D:\Game\translation_json_char_report\mapping_template.csv" --source "D:\Game\original_scripts"
+py -3 char_manager.py scan --translations "D:\Game\translation_json" --output "D:\Game\char_report" --text-encoding utf-8
 ```
 
-套用前會重新掃描原始腳本，拒絕使用原文已出現的來源字元；也會依 `scan_metadata.json` 重新掃描當初的翻譯資料夾，拒絕使用翻譯中已出現的字元。請保留完整報表資料夾，不要只搬走 `mapping_template.csv`。
+## 報表內容
 
-## 完整 CP932 字形目錄
-
-本次另附 `CP932_漢字符號字形清單.csv`（含 Unicode、名稱、類別及 CP932 位元組）及 `CP932_漢字符號字形清單.txt`（純字元清單）。本次 Python CP932 codec 掃描得到 6,968 個漢字／標點／符號字元。這是 CP932 編碼表清單，不代表每款遊戲的字型都具備全部字形；實際替換仍需避開該遊戲原文與翻譯已使用字元。
-
-## 報表
+掃描完成後會在翻譯資料夾旁建立 *_char_report 資料夾，或使用 --output 指定位置。
 
 | 檔案 | 內容 |
 |---|---|
-| `character_report.csv` | 翻譯實際使用的漢字及特殊符號、次數、檔案數、CP932 能否編碼、目前映射狀態 |
-| `cp932_glyphs.csv` | Python CP932 codec 能解碼的漢字及標點／符號清單，含 Unicode 與 CP932 位元組、原文占用與候選狀態 |
-| `safe_candidate_glyphs.csv` | 已排除原文占用、既有映射及人工排除的非 ASCII 候選來源字元 |
-| `mapping_template.csv` | 尚未映射的 CP932 不支援字元，供手動填入來源候選字元 |
-| `unmapped_characters.txt` | 尚未映射的目標字元清單 |
-| `scan_metadata.json` | 掃描來源、編碼、檔案數及掃描完整性；供套用時重新驗證 |
+| character_report.csv | 翻譯實際使用的漢字及特殊符號、次數、檔案數、CP932 可否編碼及映射狀態 |
+| cp932_glyphs.csv | CP932 字形目錄，包含 Unicode、字元名稱、類別、CP932 位元組及候選狀態 |
+| safe_candidate_glyphs.csv | 排除翻譯已用字元、既有映射及人工排除項目後的來源候選 |
+| mapping_template.csv | 尚未映射的目標字元及手動填入來源候選的欄位 |
+| unmapped_characters.txt | 尚未映射的目標字元清單 |
+| scan_metadata.json | 翻譯來源路徑、編碼、掃描數量、完整性及錯誤資訊 |
+| mapping_draft.json | GUI 保存的工作草稿；只有執行保存後才會產生 |
 
-## 字元篩選原則
+程式會在掃描時依 Python 的 CP932 codec 動態建立字形目錄，不依賴 tool/ 內的靜態字形清單。
 
-- 翻譯文字只統計漢字及 Unicode 標點／符號類別。
-- 英文字母、日文假名、數字、空白不列入統計。
-- `cp932_glyphs.csv` 保留 CP932 中的標點／符號，包括 ASCII 標點；但預設安全候選排除 ASCII 字元，避免 `%`、`&`、括號或括號類符號干擾腳本語法或格式控制。
-- 安全候選還會排除原始腳本已使用字元、翻譯文檔本身已使用字元、既有來源／目標映射及人工排除字元。來源字元若已出現在翻譯中，UIF 會連正常翻譯一起替換，因此也必須排除。
-- 原始腳本或翻譯文檔任一方掃描不完整時，不會提供安全候選，也不允許套用映射。
+## CSV 手動建立映射
 
-## 注意
+1. 開啟完整報表資料夾內的 mapping_template.csv。
+2. 在「來源候選字元（自行填入）」欄位，為每個「目標中文字」填入一個 CP932 來源字元。
+3. 來源字元不可重複，目標字元也不可重複；保留 CSV 原有欄位名稱。
+4. 保存 CSV，並保留同一資料夾的 scan_metadata.json。
+5. 執行下列套用命令。
 
-1. CP932 可編碼不代表遊戲字型一定有該字形；仍需在遊戲中實際驗證。
-2. 目前對應 T1 的 `character_substitution` 設定；不會自動改寫成 UIF 新版 `text_processor`。
-3. 掃描支援 JSON、TXT、CSV、TSV、PO、FTL、INI、XML、HTML、Markdown、YAML 等翻譯文檔；JSON 固定使用 UTF-8／UTF-8 BOM，其他文字文件使用指定編碼。
-4. 原始 ADVSCRIPT2 `.txt`／`.bin`／`.scr` 由 `scr.py` 解析，不能只選擇尚未解包的 PAK 封包。
+```bat
+py -3 char_manager.py apply --mapping "D:\Game\translation_json_char_report\mapping_template.csv"
+```
+
+可選參數：
+
+| 參數 | 說明 | 預設值 |
+|---|---|---|
+| --config | UIF uif_config.json 路徑 | tool/uif_config.json |
+| --settings | char_manager.json 路徑 | tool/char_manager.json |
+
+範例：
+
+```bat
+py -3 char_manager.py apply --mapping "D:\Game\char_report\mapping_template.csv" --config "D:\Game\UIF\uif_config.json"
+```
+
+套用時會依 scan_metadata.json 找回原翻譯資料夾並重新掃描，檢查來源字元是否已出現在最新翻譯文字中。因此不可只搬走 mapping_template.csv；必須保留完整報表資料夾，且原翻譯資料夾仍須存在。
+
+## 替代映射安全原則
+
+- 目標字元是翻譯中 CP932 無法編碼、需要替代顯示的文字。
+- 來源字元必須是 CP932 可編碼的非 ASCII 漢字、標點或符號。
+- 安全候選會排除翻譯文件已使用的字元、既有映射及人工排除字元。
+- 套用前會重新掃描翻譯文件，檢查掃描完整性及來源字元占用情形。
+- 原始遊戲腳本不在目前掃描範圍內。請自行確認來源候選沒有出現在原始遊戲文字、其他資源或控制資料中。
+- CP932 可編碼不代表遊戲字型一定具有該字形，仍須在遊戲內實際測試。
+- 本工具只更新 UIF 的 character_substitution 區段，不會自動將舊格式轉換為 text_processor。
+
+## 設定與檔案
+
+- tool/char_manager.json：保存人工排除的來源字元及文字文件編碼。
+- tool/uif_config.json：GUI 與命令列預設更新的 UIF 設定檔；可自行指定其他設定檔。
+- tool/CP932_漢字符號字形清單.csv、tool/CP932_漢字符號字形清單.txt：額外附帶的靜態參考清單，不是程式執行依賴。
+- mapping_draft.json：保存於報表資料夾的 GUI 工作草稿。
+- tool/char_manager_last_work.json：GUI 上次工作索引；執行續作功能時會使用。
+
+設定檔及工作草稿可能包含本機路徑或個人工作狀態；分享專案前請先檢查是否要一併提交。
