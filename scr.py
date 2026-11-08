@@ -1095,7 +1095,7 @@ def export_file(
         if temp_path.exists():
             temp_path.unlink()
 
-    print(f"exported {len(items)} item(s): {input_path} -> {output_path}")
+    print(f"exported {len(items)} item(s): {input_path} -> {output_path}", flush=True)
 
 
 def load_translation(path: Path) -> list[dict[str, object]]:
@@ -1125,15 +1125,26 @@ def import_file(
         raise ScriptError(
             "imported script output cannot overwrite the translation JSON"
         )
+
+    print(f"[匯入] 原始腳本：{original_path}", flush=True)
+    print(f"[匯入] 對應 JSON：{json_path}", flush=True)
+
     script = read_script(original_path)
+    print("[匯入] 原始腳本讀取成功。", flush=True)
+
     items = load_translation(json_path)
+    print(f"[匯入] JSON 讀取成功：共 {len(items)} 項。", flush=True)
+
     changed = import_items(
         script, items, encoding, dialogue_encoding, str(json_path)
     )
+    print(f"[匯入] JSON 驗證成功：修改 {changed} 筆記錄。", flush=True)
+
     write_script(script, output_path)
     print(
-        f"imported {changed} changed record(s): "
-        f"{original_path} + {json_path} -> {output_path}"
+        f"[匯入完成] 修改 {changed} 筆記錄："
+        f"{original_path} + {json_path} -> {output_path}",
+        flush=True,
     )
 
 
@@ -1175,6 +1186,7 @@ def export_path(
                 print(
                     f"skip non-script file: {file_path}",
                     file=sys.stderr,
+                    flush=True,
                 )
                 continue
             raise
@@ -1239,7 +1251,8 @@ def export_path(
         )
 
     print(
-        f"finished: exported {len(scripts)} valid ADVSCRIPT2 script(s)"
+        f"finished: exported {len(scripts)} valid ADVSCRIPT2 script(s)",
+        flush=True,
     )
 
 
@@ -1282,21 +1295,50 @@ def import_path(
     if not files:
         raise ScriptError(f"no files found: {original_path}")
 
+    print("[匯入] 開始資料夾匯入。", flush=True)
+    print(f"[匯入] 原始腳本資料夾：{original_path}", flush=True)
+    print(f"[匯入] JSON 資料夾：{json_path}", flush=True)
+    print(f"[匯入] 輸出資料夾：{output_path}", flush=True)
+
     scripts: list[Path] = []
     non_scripts: list[Path] = []
+    loaded_scripts: dict[Path, Script] = {}
+    validation_errors: list[str] = []
 
+    # 先辨識整個來源資料夾。遇到簽章無效的一般資源就略過；
+    # 若檔案有 ADVSCRIPT2 簽章但內容損壞，記錄錯誤並繼續檢查其他檔案。
     for file_path in files:
         try:
-            read_script(file_path)
-            scripts.append(file_path)
+            script = read_script(file_path)
         except ScriptError as exc:
             if str(exc).startswith("invalid ADVSCRIPT2 signature:"):
                 non_scripts.append(file_path)
-                continue
-            raise
+                print(f"[略過非腳本] {file_path}", flush=True)
+            else:
+                detail = (
+                    f"[原始腳本讀取失敗] {file_path}\n"
+                    f"原因：{type(exc).__name__}: {exc}"
+                )
+                validation_errors.append(detail)
+                print(detail, file=sys.stderr, flush=True)
+        except OSError as exc:
+            detail = (
+                f"[原始腳本讀取失敗] {file_path}\n"
+                f"原因：{type(exc).__name__}: {exc}"
+            )
+            validation_errors.append(detail)
+            print(detail, file=sys.stderr, flush=True)
+        else:
+            scripts.append(file_path)
+            loaded_scripts[file_path] = script
+            print(f"[原始腳本有效] {file_path}", flush=True)
 
-    # Stop before creating output or copying resources if there are no scripts.
     if not scripts:
+        if validation_errors:
+            raise ScriptError(
+                "找不到可匯入的有效 ADVSCRIPT2 腳本；"
+                f"另有 {len(validation_errors)} 個原始腳本錯誤，詳見上方診斷。"
+            )
         raise ScriptError(
             f"no valid ADVSCRIPT2 files found: {original_path}"
         )
@@ -1316,30 +1358,98 @@ def import_path(
         json_path, json_relatives, "translation JSON"
     )
 
-    missing_json = [
-        json_path / relative
-        for relative in json_relatives
-        if not (json_path / relative).is_file()
-    ]
-    if missing_json:
-        raise ScriptError(
-            f"missing translation JSON for script: {missing_json[0]}"
-        )
+    # 將所有缺少的 JSON 一次列出，不能只回報第一個缺檔。
+    missing_json: list[tuple[Path, Path]] = []
+    for file_path, json_relative in zip(scripts, json_relatives):
+        source_json = json_path / json_relative
+        if not source_json.is_file():
+            missing_json.append((file_path, source_json))
 
-    # Validate all JSON and all encoding changes in memory before staging.
+    for source_script, source_json in missing_json:
+        detail = (
+            f"[缺少 JSON] 原始腳本：{source_script}\n"
+            f"對應 JSON：{source_json}\n"
+            "原因：找不到對應的翻譯 JSON 檔案。"
+        )
+        validation_errors.append(detail)
+        print(detail, file=sys.stderr, flush=True)
+
+    missing_json_paths = {json_path for _script, json_path in missing_json}
+
+    # 驗證每個現存 JSON 及其編碼變更。任何一個檔案失敗都只記錄錯誤，
+    # 不會提早停止；全部檢查完後再決定是否允許進入暫存與提交階段。
     prepared_scripts: dict[Path, Script] = {}
     for file_path, json_relative in zip(scripts, json_relatives):
-        script = read_script(file_path)
         source_json = json_path / json_relative
-        items = load_translation(source_json)
-        import_items(
-            script,
-            items,
-            encoding,
-            dialogue_encoding,
-            str(source_json),
+
+        if source_json in missing_json_paths:
+            continue
+
+        print("", flush=True)
+        print(f"[匯入] 開始檢查檔案：{file_path}", flush=True)
+        print(f"[匯入] 對應 JSON：{source_json}", flush=True)
+
+        try:
+            script = loaded_scripts[file_path]
+            print("[匯入] 原始腳本讀取成功。", flush=True)
+
+            items = load_translation(source_json)
+            print(
+                f"[匯入] JSON 讀取成功：{source_json}；"
+                f"共 {len(items)} 項。",
+                flush=True,
+            )
+
+            changed = import_items(
+                script,
+                items,
+                encoding,
+                dialogue_encoding,
+                str(source_json),
+            )
+
+            prepared_scripts[file_path] = script
+            print(
+                f"[匯入] 驗證成功：{source_json}；"
+                f"修改 {changed} 筆記錄。",
+                flush=True,
+            )
+
+        except (ScriptError, OSError, UnicodeError, ValueError, KeyError) as exc:
+            detail = (
+                f"[匯入失敗] 原始腳本：{file_path}\n"
+                f"JSON：{source_json}\n"
+                f"原因：{type(exc).__name__}: {exc}"
+            )
+            validation_errors.append(detail)
+            print(detail, file=sys.stderr, flush=True)
+
+    if validation_errors:
+        print("", flush=True)
+        print(
+            f"[匯入中止] 共 {len(validation_errors)} 個檢查錯誤；"
+            "為避免部分匯入，尚未建立或提交輸出資料夾。",
+            file=sys.stderr,
+            flush=True,
         )
-        prepared_scripts[file_path] = script
+        for index, detail in enumerate(validation_errors, start=1):
+            print(
+                f"\n--- 錯誤 {index}/{len(validation_errors)} ---\n{detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+        raise ScriptError(
+            f"資料夾匯入驗證失敗：共 {len(validation_errors)} 個錯誤。"
+            "詳細原因請查看上方逐檔診斷；未寫入任何匯入輸出。"
+        )
+
+    print("", flush=True)
+    print(
+        f"[匯入] 全部驗證成功：{len(prepared_scripts)} 個腳本，"
+        f"{len(non_scripts)} 個非腳本資源。",
+        flush=True,
+    )
+    print("[匯入] 開始建立暫存輸出。", flush=True)
 
     output_root = output_path.resolve(strict=False)
     output_root.parent.mkdir(parents=True, exist_ok=True)
@@ -1359,19 +1469,30 @@ def import_path(
 
             if file_path in prepared_scripts:
                 write_script(prepared_scripts[file_path], staged)
+                print(
+                    f"[暫存完成] 腳本：{file_path} -> {relative}",
+                    flush=True,
+                )
             else:
                 shutil.copy2(file_path, staged)
+                print(
+                    f"[暫存完成] 資源：{file_path} -> {relative}",
+                    flush=True,
+                )
 
             staged_pairs.append((staged, relative))
 
+        print("[匯入] 全部檔案已完成暫存，開始提交輸出。", flush=True)
         commit_staged_files(
             staged_pairs, output_root, "import output"
         )
 
     print(
-        f"finished: imported {len(scripts)} script(s), "
-        f"copied {len(non_scripts)} non-script file(s)"
+        f"[匯入完成] 已匯入 {len(scripts)} 個腳本，"
+        f"複製 {len(non_scripts)} 個非腳本資源。",
+        flush=True,
     )
+    print(f"[匯入完成] 輸出位置：{output_root}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1457,7 +1578,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     except (OSError, UnicodeError, ScriptError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr, flush=True)
         return 1
 
     return 0
