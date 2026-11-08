@@ -16,7 +16,7 @@ py -3 GUI.py
 py -3 uif_char_helper.py
 ```
 
-主程式的 UIF 分頁和獨立 GUI 使用同一個 `UIFCharHelperApp`，不會複製另一套功能邏輯。 主程式內的 UIF 頁面可使用右側捲軸或滑鼠滾輪；摘要文字框與配對清單的內部滾動不會被外層頁面攔截。
+主程式的 UIF 分頁和獨立 GUI 使用同一個 `UIFCharHelperApp`，不會複製另一套功能邏輯。主程式內的 UIF 頁面可使用右側捲軸或滑鼠滾輪；摘要文字框與配對清單的內部滾動不會被外層頁面攔截。
 
 ## 輸入資料
 
@@ -54,11 +54,48 @@ target_characters 的完整目標字串
 
 第一行排列順序是 UIF 既有來源字、char_manager 人工映射來源字、本次新增來源字；第二行相同位置放置對應目標字。複製後分別貼到遊戲 UIF 的 `source_characters` 與 `target_characters`。
 
-工具不會修改、覆寫或備份原始 `uif_config.json`。匯出只產生兩行字串，不會直接套用到遊戲設定。
+工具不會修改或覆寫原始 `uif_config.json`。匯出只產生兩行字串，不會直接套用到遊戲設定。
 
 ## 翻譯文件替換
 
 「開始替換並另存」會使用完整 UIF 映射，將翻譯文件中的目標字替換成對應來源字，並輸出到另一個資料夾。原始資料夾不可作為輸出位置，輸出資料夾不可位於來源資料夾內，已存在且非空的輸出資料夾也會被拒絕。
+
+按下「開始替換並另存」後，會先檢查來源檔案、輸出位置、文字編碼及映射。通過檢查後，才會把本次實際使用的完整映射備份到目前載入的 `*_char_report` 資料夾。
+
+### 本次替換映射備份
+
+備份檔名格式：
+
+```text
+uif_mapping_YYYYMMDD_HHMMSS_microseconds.txt
+```
+
+例如：
+
+```text
+uif_mapping_20261108_153012_123456.txt
+```
+
+備份檔只有兩行，不會加入標題或欄位名稱：
+
+```text
+完整 source_characters
+完整 target_characters
+```
+
+內容包含三部分，順序與本次替換使用的完整映射相同：
+
+1. 遊戲 UIF 原本存在的映射。
+2. char_manager `mapping_pairs.csv` 中已接受的人工映射。
+3. UIF 輔助工具本次自動配對的新增映射。
+
+每次替換都會另建一份備份，不會覆蓋舊檔。備份內容就是傳入替換程序的同一份映射，因此之後可以直接查看當次使用的來源字與目標字。
+
+若備份無法寫入，替換程序不會開始執行。若備份成功後，替換程序才發生錯誤，備份仍會保留，以便確認該次嘗試使用的映射。
+
+**備份的是兩行映射 TXT，不是整個報表資料夾。工具不會修改、覆寫或備份遊戲的 `uif_config.json`。**
+
+### 檔案處理規則
 
 - JSON：只替換字串值，不修改鍵；保留原始縮排、空白及其他 JSON 格式，固定以 UTF-8 處理。
 - 其他支援文字格式：依 `scan_metadata.json` 的 `translation_text_encoding` 讀寫，也可在 GUI／CLI 指定覆寫編碼。
@@ -85,6 +122,8 @@ py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\T
 ```bat
 py -3 uif_char_helper.py --no-gui --uif "D:\Game\uif_config.json" --report "D:\Translation_char_report" --auto-pair --translations "D:\Translation" --output "D:\Translation_replaced"
 ```
+
+CLI 替換與 GUI 使用相同的映射備份流程，備份會寫入指定的 `--report` 資料夾。
 
 若需要覆寫一般文字檔編碼，可加入 `--encoding cp932`、`--encoding gbk` 或其他 Python 支援的編碼名稱。JSON 仍固定以 UTF-8 處理。CLI 會合併 UIF 既有映射、char_manager 人工映射及本次新增配對。
 
