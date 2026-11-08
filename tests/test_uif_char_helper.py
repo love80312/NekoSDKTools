@@ -80,7 +80,6 @@ class UIFCharHelperTests(unittest.TestCase):
         new = helper.auto_pair(context)
         self.assertEqual([(p.source, p.target) for p in new], [("鷭", "妮")])
 
-
     def test_char_manager_manual_pairs_are_preserved_and_removed_from_auto_candidates(self):
         self.write_uif(source="夬", target="婭")
         self.write_report(missing="婭伙妮", candidates=("夬", "叺", "鷭", "豸", "亜"))
@@ -145,7 +144,6 @@ class UIFCharHelperTests(unittest.TestCase):
         output = source / "out"
         with self.assertRaises(helper.UIFHelperError):
             helper.replace_translation_files(source, output, [helper.MappingPair("夬", "婭")])
-
 
     def test_cli_export_includes_char_manager_manual_pairs(self):
         self.write_uif(source="夬", target="婭")
@@ -234,7 +232,6 @@ class UIFCharHelperTests(unittest.TestCase):
         self.assertIsNone(fake.context)
         self.assertEqual(fake.new_pairs, [])
 
-
     def test_json_cp932_check_scans_values_but_not_keys_or_escaped_literals(self):
         self.write_uif(source="夬", target="婭")
         self.write_report(missing="婭", candidates=("叺", "鷭"))
@@ -249,7 +246,6 @@ class UIFCharHelperTests(unittest.TestCase):
         )
         self.assertEqual(result["cp932_unsupported"], {"😀": 1})
 
-
     def test_cp932_unsupported_counts_are_aggregated_across_files(self):
         translations = self.root / "translations"
         translations.mkdir()
@@ -260,6 +256,77 @@ class UIFCharHelperTests(unittest.TestCase):
         )
         self.assertEqual(result["cp932_unsupported"], {"😀": 3, "😁": 1})
         self.assertEqual(len(result["warnings"]), 2)
+
+    def test_mapping_snapshot_contains_all_pairs_and_does_not_overwrite(self):
+        pairs = [
+            helper.MappingPair("夬", "婭", True),   # UIF 既有映射
+            helper.MappingPair("亜", "妮", False),  # char_manager 人工映射
+            helper.MappingPair("鷭", "伙", False),  # 本次自動配對
+        ]
+
+        first = helper.save_mapping_snapshot(self.report, pairs)
+        second = helper.save_mapping_snapshot(self.report, pairs)
+
+        self.assertTrue(first.is_file())
+        self.assertTrue(second.is_file())
+        self.assertEqual(first.parent, self.report.resolve())
+        self.assertEqual(second.parent, self.report.resolve())
+        self.assertNotEqual(first, second)
+
+        expected = "夬亜鷭\n婭妮伙\n"
+        self.assertEqual(first.read_text(encoding="utf-8"), expected)
+        self.assertEqual(second.read_text(encoding="utf-8"), expected)
+        self.assertEqual(len(first.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_replace_action_saves_same_complete_pairs_before_running_replacement(self):
+        translations = self.root / "translations"
+        translations.mkdir()
+        output = self.root / "replaced"
+
+        pairs = [
+            helper.MappingPair("夬", "婭", True),
+            helper.MappingPair("亜", "妮", False),
+            helper.MappingPair("鷭", "伙", False),
+        ]
+        context = SimpleNamespace(
+            report_root=self.report.resolve(),
+            text_encoding="utf-8",
+        )
+        fake = SimpleNamespace(
+            context=context,
+            translation_var=SimpleNamespace(get=lambda: str(translations)),
+            output_var=SimpleNamespace(get=lambda: str(output)),
+            encoding_var=SimpleNamespace(get=lambda: ""),
+            status_var=SimpleNamespace(set=lambda _value: None),
+            _require_current_context=lambda: context,
+            _all_pairs=lambda: pairs,
+        )
+        result = {
+            "files_total": 1,
+            "files_changed": 1,
+            "replacements": 3,
+            "output_root": output,
+            "ambiguous_targets": [],
+            "cp932_unsupported": {},
+            "warnings": [],
+            "errors": [],
+        }
+
+        with mock.patch.object(
+            helper, "replace_translation_files", return_value=result
+        ) as replace_mock, mock.patch.object(helper.messagebox, "showinfo"):
+            helper.UIFCharHelperApp._replace(fake)
+
+        replace_mock.assert_called_once_with(
+            translations.resolve(), output.resolve(), pairs, "utf-8"
+        )
+
+        snapshots = list(self.report.glob("uif_mapping_*.txt"))
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(
+            snapshots[0].read_text(encoding="utf-8"),
+            "夬亜鷭\n婭妮伙\n",
+        )
 
 
 if __name__ == "__main__":
