@@ -1,5 +1,8 @@
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import scr
@@ -17,6 +20,15 @@ def make_text_record(name: bytes, message: bytes, main: bytes) -> scr.Record:
         main=main,
         args=args,
     )
+
+
+def create_script(path: Path, message: str = "Original") -> None:
+    record = make_text_record(
+        b"\0",
+        message.encode("cp932") + b"\0",
+        b"\0",
+    )
+    scr.write_script(scr.Script([record]), path)
 
 
 class MixedEncodingImportTests(unittest.TestCase):
@@ -89,6 +101,123 @@ class MixedEncodingImportTests(unittest.TestCase):
             scr.decode_field(record.main, "cp932", "main"),
             "[テキスト表示] Bob\nTranslated",
         )
+
+    def test_folder_import_reports_all_json_failures_without_partial_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "original"
+            translations = root / "json"
+            output = root / "output"
+            original.mkdir()
+            translations.mkdir()
+            output.mkdir()
+
+            # 保留既有輸出資料，驗證失敗時不可動到它。
+            sentinel = output / "keep.txt"
+            sentinel.write_text("KEEP", encoding="utf-8")
+
+            create_script(original / "a_valid.txt", "A")
+            create_script(original / "b_schema_error.txt", "B")
+            create_script(original / "c_invalid_json.txt", "C")
+            create_script(original / "d_missing_json.txt", "D")
+
+            (translations / "a_valid.json").write_text(
+                json.dumps([{"message": "Translated A"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (translations / "b_schema_error.json").write_text(
+                json.dumps([{"name": "missing message"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (translations / "c_invalid_json.json").write_text(
+                '[{"message": "unfinished"',
+                encoding="utf-8",
+            )
+            # d_missing.json 故意不建立。
+
+            stdout = StringIO()
+            stderr = StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                with self.assertRaises(scr.ScriptError):
+                    scr.import_path(
+                        original,
+                        translations,
+                        output,
+                        "cp932",
+                        "cp932",
+                    )
+
+            log = stdout.getvalue() + "\n" + stderr.getvalue()
+
+            # 第一個有效 JSON 已通過驗證，後續失敗檔仍須繼續檢查。
+            self.assertIn("a_valid.json", log)
+            self.assertIn("驗證成功", log)
+
+            # 欄位結構錯誤必須包含檔案、項目索引及缺少的欄位。
+            self.assertIn("b_schema_error.json", log)
+            self.assertIn("JSON item 0", log)
+            self.assertIn("'message'", log)
+
+            # 語法錯誤必須列出對應 JSON。
+            self.assertIn("c_invalid_json.json", log)
+            self.assertIn("JSONDecodeError", log)
+
+            # 缺少 JSON 的項目也要列出。
+            self.assertIn("d_missing.txt", log)
+            self.assertIn("d_missing.json", log)
+
+            # 批次驗證失敗，不得提交任何部分匯入結果。
+            self.assertTrue(sentinel.is_file())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "KEEP")
+            self.assertFalse((output / "a_valid.txt").exists())
+            self.assertFalse((output / "b_schema_error.txt").exists())
+            self.assertFalse((output / "c_invalid_json.txt").exists())
+
+    def test_folder_import_commits_only_after_every_json_validates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root / "original"
+            translations = root / "json"
+            output = root / "output"
+            original.mkdir()
+            translations.mkdir()
+
+            create_script(original / "a.txt", "Original A")
+            create_script(original / "b.txt", "Original B")
+
+            (translations / "a.json").write_text(
+                json.dumps([{"message": "Translated A"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (translations / "b.json").write_text(
+                json.dumps([{"message": "Translated B"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                scr.import_path(
+                    original,
+                    translations,
+                    output,
+                    "cp932",
+                    "cp932",
+                )
+
+            self.assertTrue((output / "a.txt").is_file())
+            self.assertTrue((output / "b.txt").is_file())
+
+            imported_a = scr.read_script(output / "a.txt")
+            imported_b = scr.read_script(output / "b.txt")
+            self.assertEqual(
+                imported_a.records[0].args[1],
+                b"Translated A\0",
+            )
+            self.assertEqual(
+                imported_b.records[0].args[1],
+                b"Translated B\0",
+            )
+            self.assertIn("[匯入完成]", stdout.getvalue())
 
 
 if __name__ == "__main__":
