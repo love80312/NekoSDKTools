@@ -70,7 +70,7 @@ class ScanResult:
 
     @property
     def source_root(self) -> None:
-        """保留舊版介面相容性；目前不掃描原始遊戲腳本。"""
+        """目前不掃描原始遊戲腳本；保留舊版屬性供相容使用。"""
         return None
 
     @property
@@ -80,8 +80,12 @@ class ScanResult:
 
     @property
     def source_scan_complete(self) -> bool:
-        """保留舊版介面相容性。"""
-        return True
+        """沒有執行原始遊戲腳本掃描，故固定為 False。"""
+        return False
+
+    @property
+    def source_scan_performed(self) -> bool:
+        return False
 
     @property
     def scanned_source_files(self) -> int:
@@ -347,16 +351,37 @@ def load_uif_mapping(config_path: Path) -> dict[str, str]:
             "target_characters 有重複字元。"
         )
 
-    return dict(zip(source_list, target_list))
+    mapping = dict(zip(source_list, target_list))
+    _validate_mapping(mapping)
+    return mapping
 
 
 def _validate_mapping(mapping: dict[str, str]) -> None:
+    """只驗證映射結構，不套用新映射的 CP932 規則。
+
+    UIF 歷史映射可能包含 CP932 可編碼的目標字元，也可能有來源與
+    目標交集。這些都必須保留；新映射的安全條件由
+    _validate_new_mapping() 獨立檢查。
+    """
+    if not isinstance(mapping, dict):
+        raise CharacterManagerError("映射資料必須是字典。")
+
+    sources: set[str] = set()
+    targets: set[str] = set()
+
     for source, target in mapping.items():
+        if not isinstance(source, str) or not isinstance(target, str):
+            raise CharacterManagerError(
+                "每組映射的來源與目標都必須是字串。"
+            )
+
         if len(source) != 1 or len(target) != 1:
             raise CharacterManagerError(
                 "每組映射的來源與目標都必須各是一個 Unicode 字元。"
             )
 
+        # 既有映射仍必須有可由遊戲 CP932 文字流表示的來源字元。
+        # 只放寬舊版錯誤的「目標也必須無法 CP932 編碼」及「禁止交集」限制。
         if not can_encode(source, "cp932"):
             raise CharacterManagerError(
                 f"來源字元 {source!r} 無法以 CP932 編碼。"
@@ -364,27 +389,70 @@ def _validate_mapping(mapping: dict[str, str]) -> None:
 
         if not is_safe_source_character(source):
             raise CharacterManagerError(
-                f"來源字元 {source!r} 不屬於預設安全的非 ASCII 漢字／符號範圍。"
+                f"來源字元 {source!r} 不屬於安全的非 ASCII 漢字／符號範圍。"
+            )
+
+        if source in sources:
+            raise CharacterManagerError(
+                f"映射來源 {source!r} 重複。"
+            )
+
+        if target in targets:
+            raise CharacterManagerError(
+                f"映射目標 {target!r} 重複。"
+            )
+
+        sources.add(source)
+        targets.add(target)
+
+
+def _validate_new_mapping(
+    mapping: dict[str, str],
+    *,
+    translation_characters: Iterable[str] = (),
+    excluded_sources: Iterable[str] = (),
+    existing_mapping: dict[str, str] | None = None,
+) -> None:
+    """僅驗證本次新增映射，不重新限制 UIF 既有映射。"""
+    _validate_mapping(mapping)
+
+    used = set(translation_characters)
+    excluded = set(excluded_sources)
+    existing = existing_mapping or {}
+    _validate_mapping(existing)
+
+    existing_targets = set(existing.values())
+
+    for source, target in mapping.items():
+        if not can_encode(source, "cp932"):
+            raise CharacterManagerError(
+                f"新來源字元 {source!r} 無法以 CP932 編碼。"
+            )
+
+        if not is_safe_source_character(source):
+            raise CharacterManagerError(
+                f"新來源字元 {source!r} 不屬於預設安全的非 ASCII 漢字／符號範圍。"
             )
 
         if can_encode(target, "cp932"):
             raise CharacterManagerError(
-                f"目標字元 {target!r} 本身可用 CP932 編碼，不需要替換。"
+                f"新目標字元 {target!r} 本身可用 CP932 編碼，不需要替換。"
             )
 
-    sources = set(mapping)
-    targets = set(mapping.values())
+        if source in used:
+            raise CharacterManagerError(
+                f"來源字元 {source!r} 已出現在翻譯文件中。"
+            )
 
-    if len(sources) != len(mapping):
-        raise CharacterManagerError("映射來源有重複字元。")
+        if source in excluded:
+            raise CharacterManagerError(
+                f"來源字元 {source!r} 已列入人工排除清單。"
+            )
 
-    if len(targets) != len(mapping):
-        raise CharacterManagerError("映射目標有重複字元。")
-
-    if sources & targets:
-        raise CharacterManagerError(
-            "來源字元與目標字元不能交叉重複，以免形成替換鏈。"
-        )
+        if source in existing_targets:
+            raise CharacterManagerError(
+                f"來源字元 {source!r} 已被既有 UIF 映射作為目標，不能再當作新來源。"
+            )
 
 
 def _replace_json_string_property(
@@ -427,6 +495,7 @@ def write_uif_mapping(
             f"找不到 UIF 設定檔：{config_path}"
         )
 
+    # 寫入函式只能做結構驗證；新增映射安全性由呼叫端負責。
     _validate_mapping(mapping)
 
     original = config_path.read_text(encoding="utf-8-sig")
@@ -464,17 +533,24 @@ def write_uif_mapping(
         "".join(mapping.values()),
     )
 
-    # 寫入前再次驗證 JSON 及映射長度。
+    # 寫入前再次驗證 JSON 及映射長度、唯一性。
     final_data = json.loads(strip_json_comments(updated))
     final_section = final_data["character_substitution"]
 
-    if (
-        len(final_section["source_characters"])
-        != len(final_section["target_characters"])
-    ):
+    final_sources = final_section.get("source_characters")
+    final_targets = final_section.get("target_characters")
+
+    if not isinstance(final_sources, str) or not isinstance(final_targets, str):
+        raise CharacterManagerError(
+            "更新後 UIF 的映射欄位不是字串，取消寫入。"
+        )
+
+    if len(final_sources) != len(final_targets):
         raise CharacterManagerError(
             "更新後的 UIF 映射長度不一致，取消寫入。"
         )
+
+    _validate_mapping(dict(zip(final_sources, final_targets)))
 
     backup = config_path.with_suffix(config_path.suffix + ".bak")
 
@@ -852,7 +928,7 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
             glyph.name,
             glyph.category,
             glyph.cp932_hex,
-            "未掃描",
+            "是" if char in result.stats else "否",
             "是" if char in mapped_sources else "否",
             "是" if char in mapped_targets else "否",
             "是" if char in excluded else "否",
@@ -869,7 +945,7 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
             "Unicode 名稱",
             "類別",
             "CP932 位元組",
-            "原文已使用",
+            "翻譯文件已使用",
             "已作為來源",
             "已作為目標",
             "人工排除",
@@ -942,9 +1018,8 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
         "translation_text_encoding": result.translation_text_encoding,
         "translation_files_scanned": result.scanned_translation_files,
         "translation_scan_complete": result.translation_scan_complete,
-        "source_root": None,
+        "source_scan_performed": False,
         "source_files_scanned": 0,
-        "source_scan_complete": True,
         "errors": result.errors,
     }
 
@@ -1061,6 +1136,10 @@ def merge_mapping(
     incoming: dict[str, str],
     label: str = "映射",
 ) -> dict[str, str]:
+    """結構性合併映射；允許既有 source/target 交集。"""
+    _validate_mapping(base)
+    _validate_mapping(incoming)
+
     merged = dict(base)
 
     for source, target in incoming.items():
@@ -1075,19 +1154,13 @@ def merge_mapping(
         for other_source, other_target in merged.items():
             if other_source != source and other_target == target:
                 raise CharacterManagerError(
-                    f"{label}衝突：目標 {target!r} 已經被使用。"
+                    f"{label}衝突：目標 {target!r} 已經被來源 "
+                    f"{other_source!r} 使用。"
                 )
-
-        if target in merged and target != source:
-            raise CharacterManagerError(
-                f"{label}衝突：目標 {target!r} "
-                "同時是其他映射的來源。"
-            )
 
         merged[source] = target
 
     _validate_mapping(merged)
-
     return merged
 
 
@@ -1191,14 +1264,14 @@ def apply_mapping_csv(
                         f"CSV 第 {row_no} 列：來源與目標都必須各是一個字元。"
                     )
 
-                if source in stats:
+                if source in additions:
                     raise CharacterManagerError(
-                        f"來源字元 {source!r} 已出現在翻譯文件中。"
+                        f"CSV 第 {row_no} 列：來源字元 {source!r} 重複。"
                     )
 
-                if source in settings["excluded_source_characters"]:
+                if target in additions.values():
                     raise CharacterManagerError(
-                        f"來源字元 {source!r} 已列入人工排除清單。"
+                        f"CSV 第 {row_no} 列：目標字元 {target!r} 重複。"
                     )
 
                 additions[source] = target
@@ -1207,6 +1280,13 @@ def apply_mapping_csv(
         raise CharacterManagerError(
             f"無法讀取映射 CSV：{exc}"
         ) from exc
+
+    _validate_new_mapping(
+        additions,
+        translation_characters=stats,
+        excluded_sources=settings["excluded_source_characters"],
+        existing_mapping=current,
+    )
 
     merged = merge_mapping(
         current,
@@ -1301,6 +1381,7 @@ class CharacterManagerFrame(ttk.Frame):
 
         self._resume_draft: dict[str, Any] | None = None
         self._draft_path: Path | None = None
+        self._resume_warnings: list[str] = []
 
         self._loaded_uif_sources: set[str] = set()
         self._removed_uif_sources: set[str] = set()
@@ -2083,9 +2164,11 @@ class CharacterManagerFrame(ttk.Frame):
             "掃描中：讀取翻譯文件及建立 CP932 字形目錄…"
         )
 
+        # 先在 Tk 主執行緒讀取 StringVar，再交給背景工作執行緒。
         encoding = (
             self.encoding_var.get().strip() or "utf-8-sig"
         )
+        settings_path = self.settings_path
 
         def worker() -> None:
             try:
@@ -2094,7 +2177,7 @@ class CharacterManagerFrame(ttk.Frame):
                     None,
                     report,
                     None,
-                    self.settings_path,
+                    settings_path,
                     text_encoding=encoding,
                 )
 
@@ -2147,6 +2230,7 @@ class CharacterManagerFrame(ttk.Frame):
                         payload.excluded_sources
                     )
 
+                    restored_ok = True
                     if self._resume_draft is not None:
                         try:
                             (
@@ -2157,18 +2241,34 @@ class CharacterManagerFrame(ttk.Frame):
                             )
 
                         except CharacterManagerError as exc:
+                            # 結構損壞時不清空或覆寫舊草稿。
+                            restored_ok = False
                             self.mapping = {}
                             self._loaded_uif_sources.clear()
                             self._removed_uif_sources.clear()
                             self._uif_was_loaded = False
 
-                            messagebox.showwarning(
-                                "工作草稿部分無法恢復",
+                            messagebox.showerror(
+                                "工作草稿無法恢復",
                                 f"{exc}\n\n"
-                                "已保留本次掃描結果，"
-                                "請重新建立發生衝突的映射。",
+                                "原始草稿不會被覆蓋。"
+                                "請先檢查或備份 mapping_draft.json。",
                                 parent=self,
                             )
+
+                        else:
+                            if self._resume_warnings:
+                                messagebox.showwarning(
+                                    "工作草稿部分恢復",
+                                    "下列映射未能恢復，其他有效配對已保留：\n\n"
+                                    + "\n".join(self._resume_warnings[:30])
+                                    + (
+                                        "\n\n其餘問題已省略。"
+                                        if len(self._resume_warnings) > 30
+                                        else ""
+                                    ),
+                                    parent=self,
+                                )
 
                         finally:
                             self._resume_draft = None
@@ -2179,6 +2279,7 @@ class CharacterManagerFrame(ttk.Frame):
                         self._loaded_uif_sources.clear()
                         self._removed_uif_sources.clear()
                         self._uif_was_loaded = False
+                        self._resume_warnings = []
 
                     self._refresh_all()
 
@@ -2201,9 +2302,12 @@ class CharacterManagerFrame(ttk.Frame):
                             parent=self,
                         )
 
-                    self._save_mapping_draft(
-                        show_message=False
-                    )
+                    # 只有成功完成草稿結構恢復時才自動保存。
+                    # 失敗時必須保留舊草稿，不能把空映射寫回去。
+                    if restored_ok:
+                        self._save_mapping_draft(
+                            show_message=False
+                        )
 
         except queue.Empty:
             pass
@@ -2404,35 +2508,27 @@ class CharacterManagerFrame(ttk.Frame):
             )
             return
 
-        if source in self.result.stats:
+        try:
+            _validate_new_mapping(
+                {source: target},
+                translation_characters=self.result.stats,
+                excluded_sources=self.excluded_sources,
+                existing_mapping=self.mapping,
+            )
+            candidate_mapping = merge_mapping(
+                self.mapping,
+                {source: target},
+                "工作映射",
+            )
+        except CharacterManagerError as exc:
             messagebox.showerror(
-                "來源字元衝突",
-                f"翻譯文件已使用 {source!r}，"
-                "UIF 會連正常文字一起替換。",
+                "映射無效",
+                str(exc),
                 parent=self,
             )
             return
 
-        if (
-            not can_encode(source, "cp932")
-            or not is_safe_source_character(source)
-        ):
-            messagebox.showerror(
-                "來源字元無效",
-                f"{source!r} 不是安全的 CP932 候選。",
-                parent=self,
-            )
-            return
-
-        if can_encode(target, "cp932"):
-            messagebox.showerror(
-                "目標字元無效",
-                f"{target!r} 本身可由 CP932 編碼，不需要替換。",
-                parent=self,
-            )
-            return
-
-        self.mapping[source] = target
+        self.mapping = candidate_mapping
 
         self._refresh_all()
 
@@ -2582,6 +2678,21 @@ class CharacterManagerFrame(ttk.Frame):
             "uif_was_loaded": self._uif_was_loaded,
         }
 
+    @staticmethod
+    def _backup_draft_file(path: Path) -> Path | None:
+        """第一次覆寫草稿前保留完整副本，不改動既有備份。"""
+        if not path.is_file():
+            return None
+
+        backup = path.with_suffix(path.suffix + ".bak")
+
+        # 每次覆寫前都更新備份，確保 .bak 是「緊接著被覆寫的上一版」，
+        # 而不是只保留首次建立的舊草稿。
+        import shutil
+        shutil.copy2(path, backup)
+
+        return backup
+
     def _save_mapping_draft(
         self,
         show_message: bool = True,
@@ -2600,6 +2711,8 @@ class CharacterManagerFrame(ttk.Frame):
         )
 
         try:
+            self._backup_draft_file(draft_path)
+
             self._atomic_write_json(
                 draft_path,
                 self._draft_payload(),
@@ -2762,6 +2875,7 @@ class CharacterManagerFrame(ttk.Frame):
             self.config_path = config_path.resolve()
             self._draft_path = draft_path
             self._resume_draft = draft
+            self._resume_warnings = []
 
             # 續作時重新掃描翻譯文件，不掃描原始遊戲腳本。
             self._start_scan()
@@ -2777,6 +2891,7 @@ class CharacterManagerFrame(ttk.Frame):
         self,
         draft: dict[str, Any],
     ) -> tuple[dict[str, str], set[str]]:
+        """逐組恢復草稿；無效映射只略過該組，不丟棄其他有效配對。"""
         if self.result is None:
             raise CharacterManagerError(
                 "沒有最新掃描結果，無法恢復映射。"
@@ -2810,18 +2925,24 @@ class CharacterManagerFrame(ttk.Frame):
                 "草稿的移除清單不屬於已載入的 UIF 映射。"
             )
 
-        restored: dict[str, str] = {}
-
         if not isinstance(pairs, list):
             raise CharacterManagerError(
                 "草稿 mapping 必須是陣列。"
             )
 
+        restored: dict[str, str] = {}
+        restored_targets: set[str] = set()
+        self._resume_warnings = []
+
+        loaded_entries: dict[str, str] = {}
+
+        # 先逐組檢查，不因單一錯誤而中止整份草稿。
         for index, pair in enumerate(pairs, start=1):
             if not isinstance(pair, dict):
-                raise CharacterManagerError(
-                    f"草稿第 {index} 組映射格式錯誤。"
+                self._resume_warnings.append(
+                    f"第 {index} 組：資料格式不是物件，已略過。"
                 )
+                continue
 
             source = pair.get("source")
             target = pair.get("target")
@@ -2832,40 +2953,45 @@ class CharacterManagerFrame(ttk.Frame):
                 or not isinstance(target, str)
                 or len(target) != 1
             ):
-                raise CharacterManagerError(
-                    f"草稿第 {index} 組來源／目標必須各是一個字元。"
+                self._resume_warnings.append(
+                    f"第 {index} 組：來源或目標不是單一字元，已略過。"
                 )
+                continue
 
-            if source in restored or target in restored.values():
-                raise CharacterManagerError(
-                    "草稿存在重複來源或目標字元。"
+            if source in restored:
+                self._resume_warnings.append(
+                    f"第 {index} 組：來源 {source!r} 重複，已略過。"
                 )
+                continue
 
-            if (
-                not can_encode(source, "cp932")
-                or not is_safe_source_character(source)
-            ):
-                raise CharacterManagerError(
-                    f"草稿來源 {source!r} 不是安全的 CP932 候選。"
+            if target in restored_targets:
+                self._resume_warnings.append(
+                    f"第 {index} 組：目標 {target!r} 重複，已略過。"
                 )
+                continue
 
-            # 新建立的來源字元必須確認沒有出現在最新翻譯文件中。
-            if (
-                source not in loaded_set
-                and source in self.result.stats
-            ):
-                raise CharacterManagerError(
-                    f"來源 {source!r} 已出現在最新翻譯文件中，"
-                    "拒絕恢復此新映射。"
-                )
-
-            if can_encode(target, "cp932"):
-                raise CharacterManagerError(
-                    f"目標 {target!r} 本身可用 CP932 編碼，"
-                    "拒絕恢復此映射。"
-                )
+            if source in loaded_set:
+                # 已載入 UIF 的歷史映射只做結構檢查。
+                # 不重新套用新來源／新目標的 CP932 規則。
+                candidate = {source: target}
+                _validate_mapping(candidate)
+                loaded_entries[source] = target
+            else:
+                try:
+                    _validate_new_mapping(
+                        {source: target},
+                        translation_characters=self.result.stats,
+                        excluded_sources=self.excluded_sources,
+                        existing_mapping=loaded_entries,
+                    )
+                except CharacterManagerError as exc:
+                    self._resume_warnings.append(
+                        f"第 {index} 組 {source!r} → {target!r}：{exc}"
+                    )
+                    continue
 
             restored[source] = target
+            restored_targets.add(target)
 
         _validate_mapping(restored)
 
@@ -2907,19 +3033,9 @@ class CharacterManagerFrame(ttk.Frame):
                 Path(value)
             )
 
-            for source, target in incoming.items():
-                if (
-                    not can_encode(source, "cp932")
-                    or not is_safe_source_character(source)
-                ):
-                    raise CharacterManagerError(
-                        f"UIF 來源 {source!r} 不是安全的 CP932 漢字／符號。"
-                    )
-
-                if can_encode(target, "cp932"):
-                    raise CharacterManagerError(
-                        f"UIF 目標 {target!r} 本身可由 CP932 編碼。"
-                    )
+            # 舊 UIF 映射允許 CP932 目標及來源／目標交集；
+            # 只驗證結構，避免誤拒絕既有設定。
+            _validate_mapping(incoming)
 
             merged = merge_mapping(
                 self.mapping,
@@ -3050,6 +3166,39 @@ class CharacterManagerFrame(ttk.Frame):
             return
 
         try:
+            translation_root = self.result.translation_root
+            selected_translation = Path(
+                self.translation_var.get().strip().strip('"')
+            ).expanduser().resolve()
+
+            if selected_translation != translation_root.resolve():
+                raise CharacterManagerError(
+                    "目前選取的翻譯資料夾與本次掃描結果不同。"
+                    "請先重新掃描，再套用映射。"
+                )
+
+            if not translation_root.is_dir():
+                raise CharacterManagerError(
+                    f"原翻譯資料夾已不存在：{translation_root}"
+                )
+
+            self.status_var.set(
+                "套用前重新掃描翻譯文件，確認來源字元未被使用…"
+            )
+            self.update_idletasks()
+
+            # 不重建昂貴的 CP932 字形目錄，只重新讀取翻譯文件。
+            fresh_stats, fresh_count, fresh_errors = scan_translation_root(
+                translation_root,
+                self.result.translation_text_encoding,
+            )
+
+            if fresh_count == 0 or fresh_errors:
+                raise CharacterManagerError(
+                    "套用前重新掃描翻譯文件失敗，拒絕更新 UIF：\n"
+                    + "\n".join(fresh_errors[:20])
+                )
+
             # 只有使用者按下「套用」後，才讀取正式 UIF 設定。
             # 若使用者沒有手動載入既有映射，仍會保留設定檔原有映射。
             existing = load_uif_mapping(
@@ -3063,20 +3212,26 @@ class CharacterManagerFrame(ttk.Frame):
                     if source not in self._removed_uif_sources
                 }
 
-            new_sources = (
-                set(self.mapping) - set(existing)
+            new_entries = {
+                source: target
+                for source, target in self.mapping.items()
+                if source not in existing
+            }
+
+            latest_settings = load_manager_settings(
+                self.settings_path
+            )
+            latest_excluded_sources = (
+                set(self.excluded_sources)
+                | set(latest_settings["excluded_source_characters"])
             )
 
-            for source in new_sources:
-                if source in self.result.stats:
-                    raise CharacterManagerError(
-                        f"新來源 {source!r} 已出現在翻譯文件中。"
-                    )
-
-                if source in self.excluded_sources:
-                    raise CharacterManagerError(
-                        f"來源 {source!r} 已列入人工排除清單。"
-                    )
+            _validate_new_mapping(
+                new_entries,
+                translation_characters=fresh_stats,
+                excluded_sources=latest_excluded_sources,
+                existing_mapping=existing,
+            )
 
             merged = merge_mapping(
                 existing,
@@ -3087,12 +3242,13 @@ class CharacterManagerFrame(ttk.Frame):
             if not messagebox.askyesno(
                 "確認更新 UIF 設定",
                 f"即將寫入 {len(merged)} 組映射。\n"
-                f"新增 {len(new_sources)} 組；"
+                f"新增 {len(new_entries)} 組；"
                 f"保留既有 {len(existing)} 組。\n\n"
                 f"設定檔：\n{self.config_path}\n\n"
                 "原設定會先備份成 .bak。是否繼續？",
                 parent=self,
             ):
+                self.status_var.set("已取消更新 UIF。")
                 return
 
             write_uif_mapping(
