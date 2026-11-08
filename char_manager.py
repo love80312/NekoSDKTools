@@ -777,7 +777,7 @@ def validate_work_mapping(result: ScanResult, mapping: dict[str, str]) -> None:
 
 # ---------------------------------------------------------------------------
 # 報表與掃描主流程
-
+# ---------------------------------------------------------------------------
 
 def _write_csv(path: Path, headers: list[str], rows: Iterable[Iterable[Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -863,7 +863,11 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
         "來源候選字元", "Unicode", "Unicode 名稱", "類別", "CP932 位元組",
     ], ([g.character, g.codepoint, g.name, g.category, g.cp932_hex] for g in result.safe_candidates))
 
-    missing = result.missing_targets
+    # 修正：報表待替換清單與 GUI 的 _current_missing_targets() 使用相同排除規則。
+    missing = [
+        stat for stat in result.missing_targets
+        if stat.character not in result.excluded_targets
+    ]
     unmapped_txt = output / "unmapped_characters.txt"
     unmapped_txt.write_text("".join(stat.character for stat in missing), encoding="utf-8", newline="\n")
 
@@ -875,7 +879,7 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
 
     metadata_report = output / "scan_metadata.json"
     metadata = {
-        "version": 3,
+        "version": 4,
         "translation_root": str(result.translation_root),
         "translation_text_encoding": result.translation_text_encoding,
         "translation_files_scanned": result.scanned_translation_files,
@@ -893,6 +897,7 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
         "exclusion_config_path": str(result.exclusion_config_path),
         "exclusion_config_sha256": result.exclusion_config_sha256,
         "manual_excluded_sources": sorted(result.excluded_sources, key=ord),
+        "excluded_targets": sorted(result.excluded_targets, key=ord),
         "source_errors": result.source_errors,
         "errors": result.errors,
         "mapping_pairs": len(result.mapping),
@@ -927,9 +932,9 @@ def write_reports(result: ScanResult) -> dict[str, Path]:
         "source_character_report.csv：原始腳本可辨識文字統計；只有指定原文時產生。",
         "cp932_glyphs.csv：CP932 字形目錄、使用狀態、各項排除命中及排除原因。",
         "safe_candidate_glyphs.csv：通過本次掃描及排除條件的來源候選。",
-        "unmapped_characters.txt：尚未映射的 CP932 不支援目標字元。",
+        "unmapped_characters.txt：尚未映射且未列入人工排除的 CP932 不支援目標字元。",
         "mapping_pairs.csv：本次工作區目前建立的映射清單。",
-        "scan_metadata.json：掃描路徑、編碼、篩選條件、清單雜湊及完整性。",
+        "scan_metadata.json：掃描路徑、編碼、篩選條件、排除目標及完整性資訊。",
         "mapping_draft.json：GUI 保存的工作草稿；保存後才產生。", "",
         "注意：常用字.txt 是使用者自訂清單，不是教育部 4,808 字表。",
         "常用字及標點／符號排除只影響來源候選，不影響翻譯統計或待替換目標。",
@@ -1105,7 +1110,8 @@ class CharacterManagerFrame(ttk.Frame):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(5, weight=1)
+        self.rowconfigure(4, weight=1)
+
         path_box = ttk.LabelFrame(self, text="掃描來源")
         path_box.grid(row=0, column=0, sticky="ew", padx=5, pady=4)
         path_box.columnconfigure(1, weight=1)
@@ -1167,105 +1173,94 @@ class CharacterManagerFrame(ttk.Frame):
         )
         help_label.grid(row=3, column=0, sticky="w", padx=8, pady=(0, 3))
 
-        # 大型字形預覽：目標字與 CP932 來源字分開顯示。
-        preview = ttk.Frame(self)
-        preview.grid(row=4, column=0, sticky="ew", padx=5, pady=(0, 4))
-        preview.columnconfigure(0, weight=1)
-        preview.columnconfigure(1, weight=1)
+        # 左側清單改為上下排列，右側保留較大的目標／來源字形預覽。
+        workspace = ttk.Panedwindow(self, orient="horizontal")
+        workspace.grid(row=4, column=0, sticky="nsew", padx=5, pady=4)
+        left_panel = ttk.Frame(workspace)
+        right_panel = ttk.Frame(workspace)
+        left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(0, weight=1)
+        left_panel.rowconfigure(1, weight=2)
+        right_panel.columnconfigure(0, weight=1)
+        right_panel.rowconfigure(0, weight=1)
+        workspace.add(left_panel, weight=1)
+        workspace.add(right_panel, weight=3)
 
-        target_preview_box = ttk.LabelFrame(
-            preview,
-            text="目標中文字形預覽",
-        )
-        target_preview_box.grid(
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(0, 4),
-        )
-
-        source_preview_box = ttk.LabelFrame(
-            preview,
-            text="CP932 來源字形預覽",
-        )
-        source_preview_box.grid(
-            row=0,
-            column=1,
-            sticky="nsew",
-            padx=(4, 0),
-        )
-
-        self.target_preview_var = tk.StringVar(value="尚未選取")
-        self.source_preview_var = tk.StringVar(value="尚未選取")
-        preview_font = ("Microsoft JhengHei UI", 34)
-
-        self.target_preview_label = ttk.Label(
-            target_preview_box,
-            textvariable=self.target_preview_var,
-            font=preview_font,
-            anchor="center",
-        )
-        self.target_preview_label.pack(
-            fill="both",
-            expand=True,
-            padx=8,
-            pady=(2, 5),
-        )
-
-        self.source_preview_label = ttk.Label(
-            source_preview_box,
-            textvariable=self.source_preview_var,
-            font=preview_font,
-            anchor="center",
-        )
-        self.source_preview_label.pack(
-            fill="both",
-            expand=True,
-            padx=8,
-            pady=(2, 5),
-        )
-
-        panes = ttk.Panedwindow(self, orient="horizontal")
-        panes.grid(row=5, column=0, sticky="nsew", padx=5, pady=4)
-        target_box = ttk.LabelFrame(panes, text="待替換目標字元（CP932 無法編碼）")
-        candidate_box = ttk.LabelFrame(panes, text="來源候選字元（CP932 可編碼）")
-        panes.add(target_box, weight=1)
-        panes.add(candidate_box, weight=2)
+        target_box = ttk.LabelFrame(left_panel, text="待替換目標字元（CP932 無法編碼）")
+        target_box.grid(row=0, column=0, sticky="nsew", padx=(0, 3), pady=(0, 3))
         target_box.rowconfigure(0, weight=1)
         target_box.columnconfigure(0, weight=1)
-        candidate_box.rowconfigure(0, weight=1)
-        candidate_box.columnconfigure(0, weight=1)
-
-        self.target_tree = ttk.Treeview(target_box, columns=("count", "files", "unicode"), show="tree headings", height=10)
+        self.target_tree = ttk.Treeview(
+            target_box, columns=("count", "files", "unicode"),
+            show="tree headings", height=6, style="Glyph.Treeview",
+        )
         self.target_tree.heading("#0", text="目標字元")
         self.target_tree.heading("count", text="次數")
         self.target_tree.heading("files", text="檔案數")
         self.target_tree.heading("unicode", text="Unicode")
-        self.target_tree.column("#0", width=95, anchor="center")
-        self.target_tree.column("count", width=60, anchor="e")
-        self.target_tree.column("files", width=65, anchor="e")
-        self.target_tree.column("unicode", width=100, anchor="center")
+        self.target_tree.column("#0", width=72, minwidth=62, anchor="center")
+        self.target_tree.column("count", width=58, anchor="e")
+        self.target_tree.column("files", width=58, anchor="e")
+        self.target_tree.column("unicode", width=94, anchor="center")
         self.target_tree.grid(row=0, column=0, sticky="nsew")
         target_scroll = ttk.Scrollbar(target_box, orient="vertical", command=self.target_tree.yview)
         target_scroll.grid(row=0, column=1, sticky="ns")
         self.target_tree.configure(yscrollcommand=target_scroll.set)
+        ttk.Button(
+            target_box, text="複製選取目標字", command=lambda: self._copy_tree_character(self.target_tree)
+        ).grid(row=1, column=0, sticky="ew", padx=4, pady=3)
 
-        self.candidate_tree = ttk.Treeview(candidate_box, columns=("unicode", "name", "bytes"), show="tree headings", height=10)
+        candidate_box = ttk.LabelFrame(left_panel, text="來源候選字元（CP932 可編碼）")
+        candidate_box.grid(row=1, column=0, sticky="nsew", padx=(0, 3), pady=(3, 0))
+        candidate_box.rowconfigure(0, weight=1)
+        candidate_box.columnconfigure(0, weight=1)
+        self.candidate_tree = ttk.Treeview(
+            candidate_box, columns=("unicode", "name", "bytes"),
+            show="tree headings", height=9, style="Glyph.Treeview",
+        )
         self.candidate_tree.heading("#0", text="來源字元")
         self.candidate_tree.heading("unicode", text="Unicode")
         self.candidate_tree.heading("name", text="Unicode 名稱")
         self.candidate_tree.heading("bytes", text="CP932 位元組")
-        self.candidate_tree.column("#0", width=90, anchor="center")
-        self.candidate_tree.column("unicode", width=100, anchor="center")
-        self.candidate_tree.column("name", width=220)
-        self.candidate_tree.column("bytes", width=90, anchor="center")
+        self.candidate_tree.column("#0", width=72, minwidth=62, anchor="center")
+        self.candidate_tree.column("unicode", width=94, anchor="center")
+        self.candidate_tree.column("name", width=190)
+        self.candidate_tree.column("bytes", width=88, anchor="center")
         self.candidate_tree.grid(row=0, column=0, sticky="nsew")
         candidate_scroll = ttk.Scrollbar(candidate_box, orient="vertical", command=self.candidate_tree.yview)
         candidate_scroll.grid(row=0, column=1, sticky="ns")
         self.candidate_tree.configure(yscrollcommand=candidate_scroll.set)
+        ttk.Button(
+            candidate_box, text="複製選取來源字", command=lambda: self._copy_tree_character(self.candidate_tree)
+        ).grid(row=1, column=0, sticky="ew", padx=4, pady=3)
+
+        preview = ttk.Frame(right_panel)
+        preview.grid(row=0, column=0, sticky="nsew")
+        preview.columnconfigure(0, weight=1)
+        preview.columnconfigure(1, weight=1)
+        preview.rowconfigure(0, weight=1)
+
+        target_preview_box = ttk.LabelFrame(preview, text="待替換目標字形預覽")
+        target_preview_box.grid(row=0, column=0, sticky="nsew", padx=(3, 4))
+        source_preview_box = ttk.LabelFrame(preview, text="CP932 來源字形預覽")
+        source_preview_box.grid(row=0, column=1, sticky="nsew", padx=(4, 3))
+
+        self.target_preview_var = tk.StringVar(value="尚未選取")
+        self.source_preview_var = tk.StringVar(value="尚未選取")
+        preview_font = ("Microsoft JhengHei UI", 52)
+        self.target_preview_label = ttk.Label(
+            target_preview_box, textvariable=self.target_preview_var,
+            font=preview_font, anchor="center",
+        )
+        self.target_preview_label.pack(fill="both", expand=True, padx=8, pady=(2, 5))
+        self.source_preview_label = ttk.Label(
+            source_preview_box, textvariable=self.source_preview_var,
+            font=preview_font, anchor="center",
+        )
+        self.source_preview_label.pack(fill="both", expand=True, padx=8, pady=(2, 5))
 
         action_row = ttk.Frame(self)
-        action_row.grid(row=6, column=0, sticky="ew", padx=5, pady=4)
+        action_row.grid(row=5, column=0, sticky="ew", padx=5, pady=4)
         for label, command in (
             ("建立配對 →", self._add_pair),
             ("移除配對", self._remove_pair),
@@ -1274,20 +1269,23 @@ class CharacterManagerFrame(ttk.Frame):
             ("匯出兩行替換字串…", self._export_two_line_mapping),
             ("保存工作草稿", self._save_mapping_draft),
         ):
-            ttk.Button(action_row, text=label, command=command).pack(side="left", padx=3)
+            ttk.Button(action_row, text=label, command=command).pack(side="left", padx=2)
         self.resume_button = ttk.Button(action_row, text="繼續上次工作…", command=self._resume_last_work, state="disabled")
         self.resume_button.pack(side="right", padx=3)
 
         mapping_box = ttk.LabelFrame(self, text="本次工作映射（來源 → 目標）")
-        mapping_box.grid(row=7, column=0, sticky="ew", padx=5, pady=4)
+        mapping_box.grid(row=6, column=0, sticky="ew", padx=5, pady=4)
         mapping_box.columnconfigure(0, weight=1)
-        self.mapping_tree = ttk.Treeview(mapping_box, columns=("target", "source_unicode", "target_unicode"), show="tree headings", height=5)
+        self.mapping_tree = ttk.Treeview(
+            mapping_box, columns=("target", "source_unicode", "target_unicode"),
+            show="tree headings", height=5, style="Mapping.Treeview",
+        )
         self.mapping_tree.heading("#0", text="來源字元")
         self.mapping_tree.heading("target", text="目標字元")
         self.mapping_tree.heading("source_unicode", text="來源 Unicode")
         self.mapping_tree.heading("target_unicode", text="目標 Unicode")
         self.mapping_tree.column("#0", width=100, anchor="center")
-        self.mapping_tree.column("target", width=100, anchor="center")
+        self.mapping_tree.column("target", width=120, anchor="center")
         self.mapping_tree.column("source_unicode", width=120, anchor="center")
         self.mapping_tree.column("target_unicode", width=120, anchor="center")
         self.mapping_tree.grid(row=0, column=0, sticky="ew")
@@ -1295,38 +1293,92 @@ class CharacterManagerFrame(ttk.Frame):
         mapping_scroll.grid(row=0, column=1, sticky="ns")
         self.mapping_tree.configure(yscrollcommand=mapping_scroll.set)
 
-        # 任一清單選取變更時，同步更新對應的大型字形預覽。
-        self.target_tree.bind(
-            "<<TreeviewSelect>>",
-            self._update_previews,
-            add="+",
-        )
-        self.candidate_tree.bind(
-            "<<TreeviewSelect>>",
-            self._update_previews,
-            add="+",
-        )
-        self.mapping_tree.bind(
-            "<<TreeviewSelect>>",
-            self._update_previews,
-            add="+",
-        )
+        # 清單選取時同步預覽；Ctrl+C 與右鍵選單可直接複製字元。
+        self.target_tree.bind("<<TreeviewSelect>>", self._update_previews, add="+")
+        self.candidate_tree.bind("<<TreeviewSelect>>", self._update_previews, add="+")
+        self.mapping_tree.bind("<<TreeviewSelect>>", self._update_previews, add="+")
+        for tree in (self.target_tree, self.candidate_tree, self.mapping_tree):
+            tree.bind("<Control-c>", lambda event, current=tree: self._on_tree_copy(event, current))
+            tree.bind("<Button-3>", lambda event, current=tree: self._show_tree_menu(event, current))
 
-        # 表格維持一般字級；只有上方預覽區使用 34 pt。
         style = ttk.Style(self)
-        style.configure(
-            "Treeview",
-            font=("Microsoft JhengHei UI", 10),
-            rowheight=25,
-        )
-        style.configure(
-            "Treeview.Heading",
-            font=("Microsoft JhengHei UI", 10, "bold"),
-        )
+        style.configure("Glyph.Treeview", font=("Microsoft JhengHei UI", 18), rowheight=35)
+        style.configure("Mapping.Treeview", font=("Microsoft JhengHei UI", 20), rowheight=42)
+        style.configure("Treeview.Heading", font=("Microsoft JhengHei UI", 10, "bold"))
 
         self.summary_var = tk.StringVar(value="映射尚未建立。")
-        ttk.Label(self, textvariable=self.summary_var).grid(row=8, column=0, sticky="w", padx=8, pady=4)
+        ttk.Label(self, textvariable=self.summary_var).grid(row=7, column=0, sticky="w", padx=8, pady=4)
         self._update_previews()
+
+    def _copy_to_clipboard(self, value: str) -> bool:
+        if not value:
+            return False
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(value)
+            self.update_idletasks()
+            self.status_var.set(f"已複製：{value}")
+            return True
+        except tk.TclError as exc:
+            messagebox.showerror("複製失敗", str(exc), parent=self)
+            return False
+
+    def _copy_tree_character(self, tree: ttk.Treeview) -> None:
+        selected = tree.selection()
+        if not selected:
+            messagebox.showinfo("尚未選取", "請先選擇要複製的字元。", parent=self)
+            return
+        item = tree.item(selected[0])
+        character = item.get("text", "")
+        if isinstance(character, str) and len(character) == 1:
+            self._copy_to_clipboard(character)
+
+    def _copy_mapping_target(self) -> None:
+        selected = self.mapping_tree.selection()
+        if not selected:
+            messagebox.showinfo("尚未選取", "請先選擇一組映射。", parent=self)
+            return
+        values = self.mapping_tree.item(selected[0]).get("values", ())
+        if values and isinstance(values[0], str) and len(values[0]) == 1:
+            self._copy_to_clipboard(values[0])
+
+    def _copy_mapping_pair(self) -> None:
+        selected = self.mapping_tree.selection()
+        if not selected:
+            messagebox.showinfo("尚未選取", "請先選擇一組映射。", parent=self)
+            return
+        item = self.mapping_tree.item(selected[0])
+        source = item.get("text", "")
+        values = item.get("values", ())
+        target = values[0] if values else ""
+        if len(source) == 1 and isinstance(target, str) and len(target) == 1:
+            self._copy_to_clipboard(source + "\t" + target)
+
+    def _on_tree_copy(self, event: Any, tree: ttk.Treeview) -> str:
+        if tree is self.mapping_tree:
+            self._copy_tree_character(tree)
+        else:
+            self._copy_tree_character(tree)
+        return "break"
+
+    def _show_tree_menu(self, event: Any, tree: ttk.Treeview) -> None:
+        row = tree.identify_row(event.y)
+        if row:
+            tree.selection_set(row)
+            tree.focus(row)
+            self._update_previews()
+        menu = tk.Menu(self, tearoff=False)
+        if tree is self.mapping_tree:
+            menu.add_command(label="複製來源字元", command=lambda: self._copy_tree_character(tree))
+            menu.add_command(label="複製目標字元", command=self._copy_mapping_target)
+            menu.add_command(label="複製來源與目標（Tab 分隔）", command=self._copy_mapping_pair)
+        else:
+            label = "複製目標字元" if tree is self.target_tree else "複製來源字元"
+            menu.add_command(label=label, command=lambda: self._copy_tree_character(tree))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     @staticmethod
     def _selected_tree_character(tree: ttk.Treeview, prefix: str) -> str | None:
@@ -1345,19 +1397,14 @@ class CharacterManagerFrame(ttk.Frame):
     def _update_previews(self, event: Any = None) -> None:
         """依觸發事件更新目標字、來源字，或整組映射預覽。"""
         widget = getattr(event, "widget", None) if event is not None else None
-
-        # 更新單一清單時，只改動該清單對應的預覽，避免其他清單
-        # 尚存的選取狀態蓋掉剛選取的字元。
         if widget is self.target_tree:
             target = self._selected_tree_character(self.target_tree, "t")
             self.target_preview_var.set(target or "尚未選取")
             return
-
         if widget is self.candidate_tree:
             source = self._selected_tree_character(self.candidate_tree, "c")
             self.source_preview_var.set(source or "尚未選取")
             return
-
         if widget is self.mapping_tree:
             source = "尚未選取"
             target = "尚未選取"
@@ -1377,10 +1424,8 @@ class CharacterManagerFrame(ttk.Frame):
             self.target_preview_var.set(target)
             return
 
-        # 初次建立介面或清單重整後，依現有選取狀態完整同步兩個預覽。
         target = self._selected_tree_character(self.target_tree, "t") or "尚未選取"
         source = self._selected_tree_character(self.candidate_tree, "c") or "尚未選取"
-
         try:
             selected = self.mapping_tree.selection()
             if selected:
@@ -1393,7 +1438,6 @@ class CharacterManagerFrame(ttk.Frame):
                     target = values[0]
         except (IndexError, TypeError, tk.TclError):
             pass
-
         self.target_preview_var.set(target)
         self.source_preview_var.set(source)
 
@@ -1418,8 +1462,6 @@ class CharacterManagerFrame(ttk.Frame):
             self._save_settings_from_ui()
         except (OSError, CharacterManagerError) as exc:
             messagebox.showerror("設定儲存失敗", str(exc), parent=self)
-
-        # 候選排除開關也是本次工作狀態；立即同步草稿並保留現有映射。
         if self.result is not None:
             self._save_mapping_draft(show_message=False)
 
